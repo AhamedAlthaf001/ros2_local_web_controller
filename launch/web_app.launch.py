@@ -28,12 +28,12 @@ def generate_launch_description():
     )
     
     # Web server node
-    web_server_node = Node(
-        package='web_test',
-        executable='web_server_node',
-        name='web_server_node',
-        output='screen'
-    )
+    # web_server_node = Node(
+    #     package='web_test',
+    #     executable='web_server_node',
+    #     name='web_server_node',
+    #     output='screen'
+    # )
     
     return LaunchDescription([
         params_file_arg,

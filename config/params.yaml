@@ -9,10 +9,15 @@ map_viewer_node:
     
     # Frame names
     map_frame: "map"
+    map_folder: "/home/linux/test_ws/src/web_test/maps"
     base_link_frame: "base_link"
     
     # Server configuration
-    port: 8082
+    ros_websocket_port: 9090
+    
+    # Launch Commands
+    mapping_launch_cmd: "ros2 launch turtlebot3_cartographer cartographer.launch.py use_sim_time:=True"
+    navigation_launch_cmd: "ros2 launch turtlebot3_navigation2 navigation2.launch.py use_sim_time:=True"
     
     # .env file path (relative to package share or absolute)
     env_file_path: ""  # Leave empty to use package_dir/.env

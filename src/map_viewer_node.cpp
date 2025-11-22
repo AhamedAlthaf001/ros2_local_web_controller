@@ -16,6 +16,44 @@
 #include <mutex>
 #include <thread>
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <cstdlib>
+#include <csignal>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <filesystem>
+#include <vector>
+#include <algorithm>
+
+namespace fs = std::filesystem;
+
+class ProcessManager {
+public:
+    pid_t start_process(const std::string& command) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Child process
+            // Setsid to create a new process group, so we can kill the whole tree
+            setsid();
+            execl("/bin/sh", "sh", "-c", command.c_str(), nullptr);
+            _exit(1); // Should not reach here
+        }
+        return pid;
+    }
+
+    void stop_process(pid_t pid) {
+        if (pid > 0) {
+            // Kill the process group
+            kill(-pid, SIGINT);
+            // Wait a bit for graceful shutdown
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            // Force kill if needed (optional, but good for robustness)
+            // kill(-pid, SIGKILL); 
+            int status;
+            waitpid(pid, &status, WNOHANG);
+        }
+    }
+};
 
 // Simple .env parser
 std::unordered_map<std::string, std::string> load_env(const std::string& filepath) {
@@ -55,6 +93,11 @@ public:
         this->declare_parameter("port", 8082);
         this->declare_parameter("env_file_path", "");
         
+        // Launch Commands
+        this->declare_parameter("mapping_launch_cmd", "ros2 launch turtlebot3_cartographer cartographer.launch.py use_sim_time:=True");
+        this->declare_parameter("navigation_launch_cmd", "ros2 launch turtlebot3_navigation2 navigation2.launch.py use_sim_time:=True");
+        this->declare_parameter("map_folder", "maps");
+        
         // Get parameters
         map_topic_ = this->get_parameter("map_topic").as_string();
         cmd_vel_topic_ = this->get_parameter("cmd_vel_topic").as_string();
@@ -65,6 +108,15 @@ public:
         base_link_frame_ = this->get_parameter("base_link_frame").as_string();
         port_ = this->get_parameter("port").as_int();
         std::string env_path = this->get_parameter("env_file_path").as_string();
+        
+        mapping_cmd_ = this->get_parameter("mapping_launch_cmd").as_string();
+        nav_cmd_ = this->get_parameter("navigation_launch_cmd").as_string();
+        map_folder_ = this->get_parameter("map_folder").as_string();
+
+        // Ensure map folder exists
+        if (!fs::exists(map_folder_)) {
+            fs::create_directories(map_folder_);
+        }
         
         RCLCPP_INFO(this->get_logger(), "Map Viewer Node Started");
         RCLCPP_INFO(this->get_logger(), "  Port: %d", port_);
@@ -149,6 +201,11 @@ public:
 
         if (server_thread_.joinable())
             server_thread_.join();
+            
+        // Stop any running child process
+        if (current_pid_ > 0) {
+            process_manager_.stop_process(current_pid_);
+        }
     }
 
 private:
@@ -195,9 +252,18 @@ private:
         CROW_ROUTE((*app_), "/").methods("GET"_method)
         ([this](const crow::request& req, crow::response& res) {
             if (is_authenticated(req)) {
-                // Already logged in, redirect to map
-                res.code = 302;
-                res.set_header("Location", "/map");
+                // Already logged in, serve nav.html directly (default)
+                std::ifstream t(get_web_path("nav.html"));
+                if (!t.is_open()) {
+                    res.code = 500;
+                    res.write("Navigation page not found");
+                    res.end();
+                    return;
+                }
+                std::stringstream buffer;
+                buffer << t.rdbuf();
+                res.set_header("Content-Type", "text/html");
+                res.write(buffer.str());
                 res.end();
                 return;
             }
@@ -211,6 +277,7 @@ private:
             }
             std::stringstream buffer;
             buffer << t.rdbuf();
+            res.set_header("Content-Type", "text/html");
             res.write(buffer.str());
             res.end();
         });
@@ -228,12 +295,16 @@ private:
             
             if (!auth_enabled_ || 
                 (username == env_vars_["WEB_USERNAME"] && password == env_vars_["WEB_PASSWORD"])) {
+                
+                std::lock_guard<std::mutex> lock(mtx_);
+                // Check if a controller is already active
+                if (controller_connection_ != nullptr) {
+                    return crow::response(503, "{\"success\": false, \"error\": \"System Busy: Another user is controlling the robot.\"}");
+                }
+
                 // Valid credentials
                 std::string token = generate_session_token();
-                {
-                    std::lock_guard<std::mutex> lock(mtx_);
-                    active_sessions_.insert(token);
-                }
+                active_sessions_.insert(token);
                 
                 crow::response res(200);
                 res.set_header("Set-Cookie", "session_token=" + token + "; Path=/; HttpOnly");
@@ -246,34 +317,19 @@ private:
             }
         });
         
-        // Map page - redirect to teleop
+        // Map page - redirect to mapping.html
         CROW_ROUTE((*app_), "/map").methods("GET"_method)
         ([this](const crow::request& req, crow::response& res) {
             res.code = 302;
-            res.set_header("Location", "/teleop");
+            res.set_header("Location", "/mapping.html");
             res.end();
         });
         
-        // Teleoperation page
+        // Teleoperation page - redirect to mapping.html
         CROW_ROUTE((*app_), "/teleop").methods("GET"_method)
         ([this](const crow::request& req, crow::response& res) {
-            if (!is_authenticated(req)) {
-                res.code = 302;
-                res.set_header("Location", "/");
-                res.end();
-                return;
-            }
-            
-            std::ifstream t(get_web_path("teleop.html"));
-            if (!t.is_open()) {
-                res.code = 500;
-                res.write("Teleop page not found");
-                res.end();
-                return;
-            }
-            std::stringstream buffer;
-            buffer << t.rdbuf();
-            res.write(buffer.str());
+            res.code = 302;
+            res.set_header("Location", "/mapping.html");
             res.end();
         });
         
@@ -296,6 +352,7 @@ private:
             }
             std::stringstream buffer;
             buffer << t.rdbuf();
+            res.set_header("Content-Type", "text/html");
             res.write(buffer.str());
             res.end();
         });
@@ -316,32 +373,211 @@ private:
             res.write(buffer.str());
             res.end();
         });
+        
+        CROW_ROUTE((*app_), "/mapping.html").methods("GET"_method)
+        ([this](const crow::request& req, crow::response& res) {
+            if (!is_authenticated(req)) {
+                res.code = 302;
+                res.set_header("Location", "/");
+                res.end();
+                return;
+            }
+            
+            std::ifstream t(get_web_path("mapping.html"));
+            if (!t.is_open()) {
+                res.code = 404;
+                res.write("mapping.html not found");
+                res.end();
+                return;
+            }
+            std::stringstream buffer;
+            buffer << t.rdbuf();
+            res.set_header("Content-Type", "text/html");
+            res.write(buffer.str());
+            res.end();
+        });
+
+
+
+        CROW_ROUTE((*app_), "/nav.html").methods("GET"_method)
+        ([this](const crow::request& req, crow::response& res) {
+            if (!is_authenticated(req)) {
+                res.code = 302;
+                res.set_header("Location", "/");
+                res.end();
+                return;
+            }
+            
+            std::ifstream t(get_web_path("nav.html"));
+            if (!t.is_open()) {
+                res.code = 404;
+                res.write("nav.html not found");
+                res.end();
+                return;
+            }
+            std::stringstream buffer;
+            buffer << t.rdbuf();
+            res.set_header("Content-Type", "text/html");
+            res.write(buffer.str());
+            res.end();
+        });
+        
+        // API Endpoints for Process Management
+        
+        CROW_ROUTE((*app_), "/api/start_mapping").methods("POST"_method)
+        ([this](const crow::request&) {
+            std::lock_guard<std::mutex> _(process_mtx_);
+            if (current_pid_ > 0) {
+                process_manager_.stop_process(current_pid_);
+            }
+            RCLCPP_INFO(this->get_logger(), "Starting Mapping: %s", mapping_cmd_.c_str());
+            current_pid_ = process_manager_.start_process(mapping_cmd_);
+            return "started";
+        });
+
+        CROW_ROUTE((*app_), "/api/start_navigation").methods("POST"_method)
+        ([this](const crow::request& req) {
+            std::lock_guard<std::mutex> _(process_mtx_);
+            auto body = crow::json::load(req.body);
+            std::string map_file = "";
+            if (body && body.has("map_name")) {
+                std::string map_name = body["map_name"].s();
+                // Map is now in a subdirectory: maps/<map_name>/<map_name>.yaml
+                map_file = "map:=" + (fs::path(map_folder_) / map_name / (map_name + ".yaml")).string();
+            }
+            
+            if (current_pid_ > 0) {
+                process_manager_.stop_process(current_pid_);
+            }
+            
+            std::string cmd = nav_cmd_;
+            if (!map_file.empty()) {
+                cmd += " " + map_file;
+            }
+            
+            RCLCPP_INFO(this->get_logger(), "Starting Navigation: %s", cmd.c_str());
+            current_pid_ = process_manager_.start_process(cmd);
+            return "started";
+        });
+
+        CROW_ROUTE((*app_), "/api/save_map").methods("POST"_method)
+        ([this](const crow::request& req) {
+            auto body = crow::json::load(req.body);
+            if (!body || !body.has("map_name")) return crow::response(400, "Missing map_name");
+            
+            std::string map_name = body["map_name"].s();
+            
+            // Create subdirectory for the map
+            fs::path map_dir = fs::path(map_folder_) / map_name;
+            if (!fs::exists(map_dir)) {
+                fs::create_directories(map_dir);
+            }
+            
+            // Save map inside the subdirectory
+            std::string map_path = (map_dir / map_name).string();
+            
+            std::string cmd = "ros2 run nav2_map_server map_saver_cli -f " + map_path;
+            RCLCPP_INFO(this->get_logger(), "Saving map: %s", cmd.c_str());
+            
+            int ret = std::system(cmd.c_str());
+            if (ret == 0) return crow::response(200, "saved");
+            else return crow::response(500, "failed to save");
+        });
+
+        CROW_ROUTE((*app_), "/api/list_maps").methods("GET"_method)
+        ([this]() {
+            crow::json::wvalue x;
+            int i = 0;
+            if (fs::exists(map_folder_)) {
+                for (const auto& entry : fs::directory_iterator(map_folder_)) {
+                    // Check if it's a directory and contains the yaml file
+                    if (entry.is_directory()) {
+                        std::string map_name = entry.path().filename().string();
+                        fs::path yaml_path = entry.path() / (map_name + ".yaml");
+                        if (fs::exists(yaml_path)) {
+                            x[i++] = map_name;
+                        }
+                    }
+                }
+            }
+            return x;
+        });
+
+        CROW_ROUTE((*app_), "/api/reset_mapping").methods("POST"_method)
+        ([this]() {
+             std::lock_guard<std::mutex> _(process_mtx_);
+            if (current_pid_ > 0) {
+                process_manager_.stop_process(current_pid_);
+            }
+            RCLCPP_INFO(this->get_logger(), "Restarting Mapping: %s", mapping_cmd_.c_str());
+            current_pid_ = process_manager_.start_process(mapping_cmd_);
+            return "reset";
+        });
 
         CROW_ROUTE((*app_), "/ws")
             .websocket()
             .onopen([this](crow::websocket::connection& conn) {
-                // Note: We can't easily check auth here with Crow, so we rely on browser cookies
                 std::lock_guard<std::mutex> _(mtx_);
                 int id = ++next_user_id_;
                 users_[&conn] = id;
-                RCLCPP_INFO(this->get_logger(), "New WebSocket connection. Assigned User ID: %d", id);
-                
-                if (!last_map_json_.empty()) {
-                    conn.send_text(last_map_json_);
-                }
+                RCLCPP_INFO(this->get_logger(), "New WebSocket connection. Assigned User ID: %d. Waiting for auth...", id);
+                // Do NOT send map data yet. Wait for auth.
             })
             .onclose([this](crow::websocket::connection& conn, const std::string& reason) {
                 std::lock_guard<std::mutex> _(mtx_);
                 int id = users_[&conn];
                 users_.erase(&conn);
+                
+                if (&conn == controller_connection_) {
+                    RCLCPP_INFO(this->get_logger(), "Controller disconnected.");
+                    controller_connection_ = nullptr;
+                    controller_session_token_ = "";
+                }
+                
                 RCLCPP_INFO(this->get_logger(), "User %d disconnected: %s", id, reason.c_str());
             })
-            .onmessage([this](crow::websocket::connection& /*conn*/, const std::string& data, bool is_binary) {
+            .onmessage([this](crow::websocket::connection& conn, const std::string& data, bool is_binary) {
                 if (is_binary) return;
                 
                 try {
                     auto x = crow::json::load(data);
                     if (!x) return;
+                    
+                    if (x.has("type") && x["type"].s() == "auth") {
+                        std::string token = x["token"].s();
+                        std::lock_guard<std::mutex> lock(mtx_);
+                        
+                        if (active_sessions_.count(token) || !auth_enabled_) {
+                            // Valid session
+                            if (controller_connection_ != nullptr && controller_connection_ != &conn) {
+                                // Close old connection
+                                controller_connection_->close("Connection replaced by new session");
+                                RCLCPP_INFO(this->get_logger(), "Replacing old controller connection.");
+                            }
+                            
+                            controller_connection_ = &conn;
+                            controller_session_token_ = token;
+                            RCLCPP_INFO(this->get_logger(), "Controller authenticated and active.");
+                            
+                            // Send initial state
+                            if (!last_map_json_.empty()) {
+                                conn.send_text(last_map_json_);
+                            }
+                        } else {
+                            RCLCPP_WARN(this->get_logger(), "Invalid auth token. Closing connection.");
+                            conn.close("Invalid authentication");
+                        }
+                        return;
+                    }
+
+                    // Enforce control: Only controller_connection_ can send commands
+                    {
+                        std::lock_guard<std::mutex> lock(mtx_);
+                        if (&conn != controller_connection_) {
+                            // Ignore commands from non-controllers (or unauthenticated)
+                            return;
+                        }
+                    }
                     
                     if (x.has("type") && x["type"].s() == "cmd_vel") {
                         auto msg = geometry_msgs::msg::TwistStamped();
@@ -604,6 +840,11 @@ private:
     std::thread server_thread_;
     std::unordered_map<crow::websocket::connection*, int> users_;
     std::unordered_set<std::string> active_sessions_;
+    
+    // Single User Control
+    std::string controller_session_token_;
+    crow::websocket::connection* controller_connection_ = nullptr;
+    
     int next_user_id_ = 0;
     std::string last_map_json_;
     
@@ -631,6 +872,14 @@ private:
     int port_;
     
     std::mutex mtx_;
+    
+    ProcessManager process_manager_;
+    pid_t current_pid_ = -1;
+    std::mutex process_mtx_;
+    
+    std::string mapping_cmd_;
+    std::string nav_cmd_;
+    std::string map_folder_;
 };
 
 int main(int argc, char * argv[])

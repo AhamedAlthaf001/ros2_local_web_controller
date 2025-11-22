@@ -28,7 +28,7 @@
             <span class="logo-text">ROS 2 Navigation</span>
         </div>
         <div class="nav-tabs">
-            <a href="/teleop" class="nav-tab">Teleoperation</a>
+            <a href="/mapping.html" class="nav-tab">Mapping</a>
             <a href="/nav" class="nav-tab active">Navigation</a>
         </div>
         <div id="status-badge">
@@ -44,6 +44,13 @@
 
     <div class="panel" id="controls">
         <div class="panel-label">Navigation Controls</div>
+        <div class="control-section" style="margin-bottom: 15px;">
+            <label class="control-label" style="display: block; margin-bottom: 5px;">Select Map</label>
+            <select id="mapSelect" onchange="loadMap()"
+                style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-tertiary); color: var(--text-primary);">
+                <option value="" disabled selected>Loading maps...</option>
+            </select>
+        </div>
         <button id="setGoalBtn" onclick="toggleGoalMode()" style="margin-bottom: 12px; width: 100%;">Set Goal</button>
         <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">Drag map to pan, click Set Goal
             to place navigation target</p>
@@ -116,10 +123,31 @@
             document.getElementById('themeIcon').textContent = '🌙';
         }
 
+        function getCookie(name) {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+        }
+
         function connect() {
             ws = new WebSocket('ws://' + window.location.hostname + ':8082/ws');
-            ws.onopen = () => { statusDot.classList.remove('disconnected'); statusText.textContent = 'Connected'; };
-            ws.onclose = () => { statusDot.classList.add('disconnected'); statusText.textContent = 'Disconnected'; setTimeout(connect, 1000); };
+            ws.onopen = () => {
+                statusDot.classList.remove('disconnected');
+                statusText.textContent = 'Connected';
+
+                // Authenticate
+                const token = getCookie('session_token');
+                if (token) {
+                    ws.send(JSON.stringify({ type: 'auth', token: token }));
+                }
+            };
+            ws.onclose = (event) => {
+                statusDot.classList.add('disconnected');
+                statusText.textContent = 'Disconnected: ' + (event.reason || 'Retrying...');
+                if (event.reason !== "Connection replaced by new session" && event.reason !== "Invalid authentication") {
+                    setTimeout(connect, 1000);
+                }
+            };
             ws.onmessage = (event) => {
                 try {
                     const msg = JSON.parse(event.data);
@@ -428,6 +456,60 @@
         document.getElementById('showPlan').onchange = (e) => { showPlan = e.target.checked; drawMap(); };
         document.getElementById('showLidar').onchange = (e) => { showLidar = e.target.checked; drawMap(); };
 
+        function fetchMaps() {
+            console.log('Fetching maps...');
+            fetch('/api/list_maps')
+                .then(response => response.json())
+                .then(maps => {
+                    console.log('Maps fetched:', maps);
+                    const select = document.getElementById('mapSelect');
+                    select.innerHTML = '';
+                    if (maps.length === 0) {
+                        const option = document.createElement('option');
+                        option.text = "No maps found";
+                        select.add(option);
+                        console.log('No maps found.');
+                        return;
+                    }
+
+                    maps.forEach(map => {
+                        const option = document.createElement('option');
+                        option.value = map;
+                        option.text = map;
+                        select.add(option);
+                    });
+
+                    // Load the first map by default or the last selected one
+                    const lastMap = localStorage.getItem('lastMap');
+                    if (lastMap && maps.includes(lastMap)) {
+                        select.value = lastMap;
+                    } else {
+                        select.value = maps[0];
+                    }
+                    loadMap();
+                })
+                .catch(error => console.error('Error fetching maps:', error));
+        }
+
+        function loadMap() {
+            const mapName = document.getElementById('mapSelect').value;
+            if (!mapName) return;
+
+            localStorage.setItem('lastMap', mapName);
+            console.log('Loading map:', mapName);
+
+            fetch('/api/start_navigation', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ map_name: mapName })
+            })
+                .then(response => response.text())
+                .then(data => console.log('Navigation started:', data))
+                .catch(error => console.error('Error starting navigation:', error));
+        }
+
+        // Initial fetch
+        fetchMaps();
         connect();
     </script>
 </body>
