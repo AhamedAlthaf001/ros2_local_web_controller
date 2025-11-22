@@ -1,0 +1,568 @@
+/* ============================================
+   ROS 2 Web Interface - Shared Styles
+   ============================================ */
+
+/* Prevent flash of unstyled content */
+html:not(.theme-loaded) body {
+    visibility: hidden;
+}
+
+html.theme-loaded body {
+    visibility: visible;
+}
+
+/* ============================================
+   CSS Custom Properties (Theme Variables)
+   ============================================ */
+
+:root {
+    --bg-primary: #0a0e27;
+    --bg-secondary: #1a1a2e;
+    --bg-tertiary: #0f0c29;
+    --panel-bg: rgba(26, 26, 46, 0.8);
+    --text-primary: #ffffff;
+    --text-secondary: rgba(255, 255, 255, 0.6);
+    --border-color: rgba(255, 255, 255, 0.1);
+    --map-free: rgb(40, 44, 70);
+    --map-occupied: rgb(200, 200, 220);
+    --map-unknown: rgb(60, 65, 90);
+}
+
+[data-theme="light"] {
+    --bg-primary: #f0f4f8;
+    --bg-secondary: #ffffff;
+    --bg-tertiary: #e6eef5;
+    --panel-bg: rgba(255, 255, 255, 0.95);
+    --text-primary: #1a202c;
+    --text-secondary: rgba(26, 32, 44, 0.7);
+    --border-color: rgba(0, 0, 0, 0.1);
+    --map-free: rgb(240, 242, 245);
+    --map-occupied: rgb(50, 60, 80);
+    --map-unknown: rgb(200, 205, 210);
+}
+
+/* ============================================
+   Base Styles & Reset
+   ============================================ */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Inter', sans-serif;
+    background: var(--bg-primary);
+    overflow: hidden;
+    color: var(--text-primary);
+    transition: background 0.3s ease, color 0.3s ease;
+}
+
+/* ============================================
+   Canvas Styles
+   ============================================ */
+
+canvas {
+    display: block;
+}
+
+canvas.grab {
+    cursor: grab;
+}
+
+canvas.grab:active {
+    cursor: grabbing;
+}
+
+canvas.crosshair {
+    cursor: crosshair;
+}
+
+/* ============================================
+   Map Container
+   ============================================ */
+
+#map-container {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    background: linear-gradient(135deg, var(--bg-tertiary) 0%, var(--bg-secondary) 50%, var(--bg-primary) 100%);
+    transition: background 0.3s ease;
+}
+
+/* ============================================
+   Header / Navigation Bar
+   ============================================ */
+
+#header {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 70px;
+    background: var(--panel-bg);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    padding: 0 30px;
+    z-index: 10;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+    transition: background 0.3s ease;
+}
+
+.logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.logo-icon {
+    width: 40px;
+    height: 40px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.logo-icon svg {
+    width: 24px;
+    height: 24px;
+}
+
+.logo-text {
+    font-size: 20px;
+    font-weight: 700;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+/* ============================================
+   Navigation Tabs
+   ============================================ */
+
+.nav-tabs {
+    margin-left: auto;
+    margin-right: 20px;
+    display: flex;
+    gap: 10px;
+}
+
+.nav-tab {
+    padding: 10px 20px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    color: rgba(255, 255, 255, 0.6);
+    cursor: pointer;
+    transition: all 0.2s;
+    text-decoration: none;
+}
+
+.nav-tab:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+}
+
+[data-theme="light"] .nav-tab {
+    background: rgba(0, 0, 0, 0.05);
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    color: rgba(0, 0, 0, 0.6);
+}
+
+[data-theme="light"] .nav-tab:hover {
+    background: rgba(0, 0, 0, 0.1);
+    color: #1a202c;
+}
+
+.nav-tab.active {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: #fff;
+    border-color: transparent;
+}
+
+/* ============================================
+   Status Badge
+   ============================================ */
+
+#status-badge {
+    margin-left: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 20px;
+    font-size: 13px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+[data-theme="light"] #status-badge {
+    background: rgba(0, 0, 0, 0.05);
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    color: #1a202c;
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #10b981;
+    animation: pulse 2s infinite;
+}
+
+.status-dot.disconnected {
+    background: #ef4444;
+}
+
+@keyframes pulse {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.5;
+    }
+}
+
+/* ============================================
+   Theme Toggle Button
+   ============================================ */
+
+.theme-toggle {
+    width: 50px;
+    height: 50px;
+    background: var(--panel-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-left: 15px;
+}
+
+.theme-toggle:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.theme-icon {
+    font-size: 24px;
+}
+
+/* ============================================
+   Control Panels
+   ============================================ */
+
+#controls,
+.panel {
+    position: absolute;
+    background: var(--panel-bg);
+    backdrop-filter: blur(20px);
+    padding: 20px;
+    border-radius: 16px;
+    border: 1px solid var(--border-color);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+    transition: background 0.3s ease;
+}
+
+#controls {
+    top: 90px;
+    left: 20px;
+    min-width: 200px;
+}
+
+.control-section {
+    margin-bottom: 20px;
+}
+
+.control-section:last-child {
+    margin-bottom: 0;
+}
+
+.control-label,
+.panel-label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.5);
+    margin-bottom: 12px;
+    letter-spacing: 0.5px;
+}
+
+[data-theme="light"] .control-label,
+[data-theme="light"] .panel-label {
+    color: rgba(0, 0, 0, 0.5);
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    cursor: pointer;
+    color: var(--text-primary);
+}
+
+input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+}
+
+/* ============================================
+   Buttons
+   ============================================ */
+
+button {
+    padding: 10px 16px;
+    background: rgba(102, 126, 234, 0.15);
+    border: 1px solid rgba(102, 126, 234, 0.3);
+    border-radius: 10px;
+    color: #667eea;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-family: 'Inter', sans-serif;
+}
+
+button:hover {
+    background: rgba(102, 126, 234, 0.25);
+    border-color: rgba(102, 126, 234, 0.5);
+    transform: translateY(-2px);
+}
+
+button:active {
+    transform: translateY(0);
+}
+
+.button-group {
+    display: flex;
+    gap: 8px;
+}
+
+.button-group button {
+    flex: 1;
+}
+
+.btn-icon {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    font-size: 16px;
+}
+
+/* ============================================
+   Info Panel
+   ============================================ */
+
+#info-panel,
+#nav-status {
+    position: absolute;
+    top: 90px;
+    right: 20px;
+    background: var(--panel-bg);
+    backdrop-filter: blur(20px);
+    padding: 20px;
+    border-radius: 16px;
+    border: 1px solid var(--border-color);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+    min-width: 240px;
+    transition: background 0.3s ease;
+}
+
+.info-item,
+.status-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.info-item:last-child,
+.status-item:last-child {
+    border-bottom: none;
+}
+
+.info-label,
+.status-label {
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.info-value,
+.status-value {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 13px;
+    font-family: 'Courier New', monospace;
+}
+
+.status-value.active {
+    color: #10b981;
+}
+
+.status-value.failed {
+    color: #ef4444;
+}
+
+/* ============================================
+   Joystick
+   ============================================ */
+
+#joystick-zone {
+    position: absolute;
+    bottom: 40px;
+    right: 40px;
+    width: 160px;
+    height: 160px;
+    background: var(--panel-bg);
+    backdrop-filter: blur(20px);
+    border-radius: 50%;
+    border: 1px solid rgba(102, 126, 234, 0.3);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+    transition: background 0.3s ease;
+}
+
+/* ============================================
+   Bottom Status Bar
+   ============================================ */
+
+#bottom-status {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.stat-item {
+    background: var(--panel-bg);
+    backdrop-filter: blur(20px);
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    transition: background 0.3s ease;
+}
+
+/* ============================================
+   Responsive Design
+   ============================================ */
+
+/* Tablet and smaller desktop */
+@media (max-width: 1024px) {
+    #controls {
+        left: 15px;
+        min-width: 180px;
+    }
+
+    #info-panel,
+    #nav-status {
+        right: 15px;
+        min-width: 220px;
+    }
+}
+
+/* Mobile devices */
+@media (max-width: 768px) {
+    #header {
+        padding: 0 15px;
+        height: 60px;
+    }
+
+    .logo-text {
+        font-size: 16px;
+    }
+
+    .nav-tab {
+        padding: 8px 12px;
+        font-size: 13px;
+    }
+
+    /* Stack panels vertically on the left or make them collapsible */
+    #controls {
+        top: 75px;
+        left: 10px;
+        width: calc(50% - 15px);
+        min-width: 160px;
+        max-height: calc(50vh - 80px);
+        overflow-y: auto;
+    }
+
+    #info-panel,
+    #nav-status {
+        top: 75px;
+        right: 10px;
+        width: calc(50% - 15px);
+        min-width: 160px;
+        max-height: calc(50vh - 80px);
+        overflow-y: auto;
+    }
+
+    /* Adjust joystick position */
+    #joystick-zone {
+        width: 120px;
+        height: 120px;
+        bottom: 20px;
+        right: 20px;
+    }
+
+    /* Adjust bottom status */
+    #bottom-status {
+        bottom: 10px;
+        left: 10px;
+        font-size: 11px;
+    }
+}
+
+/* Very small screens */
+@media (max-width: 480px) {
+    .logo-text {
+        display: none;
+        /* Hide text to save space */
+    }
+
+    .nav-tabs {
+        margin-right: 10px;
+    }
+
+    #controls {
+        top: 70px;
+        left: 10px;
+        right: 10px;
+        width: auto;
+        max-height: 30vh;
+    }
+
+    #info-panel,
+    #nav-status {
+        top: auto;
+        bottom: 150px;
+        /* Above joystick */
+        left: 10px;
+        right: auto;
+        width: 180px;
+        max-height: 25vh;
+    }
+
+    #joystick-zone {
+        bottom: 20px;
+        right: 20px;
+    }
+}

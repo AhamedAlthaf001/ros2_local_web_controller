@@ -1,0 +1,18 @@
+map_viewer_node:
+  ros__parameters:
+    # Topic names
+    map_topic: "/map"
+    cmd_vel_topic: "/cmd_vel"
+    scan_topic: "/scan"
+    plan_topic: "/plan"  # Nav2 planner output
+    goal_topic: "/goal_pose"
+    
+    # Frame names
+    map_frame: "map"
+    base_link_frame: "base_link"
+    
+    # Server configuration
+    port: 8082
+    
+    # .env file path (relative to package share or absolute)
+    env_file_path: ""  # Leave empty to use package_dir/.env

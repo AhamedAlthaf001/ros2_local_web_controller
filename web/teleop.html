@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ROS 2 Map Viewer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+        // Apply theme immediately to prevent flash
+        (function () {
+            const savedTheme = localStorage.getItem('theme') || 'dark';
+            if (savedTheme === 'light') {
+                document.documentElement.setAttribute('data-theme', 'light');
+            }
+            document.documentElement.classList.add('theme-loaded');
+        })();
+    </script>
+    <link rel="stylesheet" href="/style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js"></script>
+</head>
+
+<body>
+    <div id="map-container">
+        <!-- Header -->
+        <div id="header">
+            <div class="logo">
+                <div class="logo-icon">
+                    <svg fill="#ffffff" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z" />
+                    </svg>
+                </div>
+                <span class="logo-text">ROS 2 Teleoperation</span>
+            </div>
+            <div class="nav-tabs">
+                <a href="/teleop" class="nav-tab active">Teleoperation</a>
+                <a href="/nav" class="nav-tab">Navigation</a>
+            </div>
+            <div id="status-badge">
+                <span class="status-dot disconnected" id="statusDot"></span>
+                <span id="statusText">Connecting...</span>
+            </div>
+            <div class="theme-toggle" onclick="toggleTheme()" title="Toggle Theme">
+                <span class="theme-icon" id="themeIcon">☀️</span>
+            </div>
+        </div>
+
+        <!-- Canvas -->
+        <canvas id="mapCanvas" class="grab"></canvas>
+
+        <!-- Controls -->
+        <div id="controls">
+            <div class="control-section">
+                <div class="control-label">View Options</div>
+                <label class="checkbox-label">
+                    <input type="checkbox" id="showLidar" checked>
+                    <span>Show LiDAR</span>
+                </label>
+            </div>
+            <div class="control-section">
+                <div class="control-label">Zoom</div>
+                <div class="button-group">
+                    <button class="btn-icon" onclick="zoomIn()" title="Zoom In">+</button>
+                    <button class="btn-icon" onclick="zoomOut()" title="Zoom Out">−</button>
+                    <button class="btn-icon" onclick="resetView()" title="Reset View">⟲</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Info Panel -->
+        <div id="info-panel">
+            <div class="control-label">Robot Info</div>
+            <div class="info-item">
+                <span class="info-label">X Position</span>
+                <span class="info-value" id="posX">---</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Y Position</span>
+                <span class="info-value" id="posY">---</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Rotation</span>
+                <span class="info-value" id="posTheta">---</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Map Size</span>
+                <span class="info-value" id="mapSize">---</span>
+            </div>
+        </div>
+
+        <!-- Joystick -->
+        <div id="joystick-zone"></div>
+
+        <!-- Bottom Status -->
+        <div id="bottom-status">
+            <div class="stat-item">Scale: <span id="scaleValue">1.0</span>x</div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('mapCanvas');
+        const ctx = canvas.getContext('2d');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+
+        // Resize canvas to full screen
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            if (typeof drawMap === 'function') {
+                drawMap();
+            }
+        }
+
+        // Initialize canvas size (don't call drawMap yet as mapData isn't initialized)
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        window.addEventListener('resize', resizeCanvas);
+
+        let ws;
+        let mapData = null;
+        let robotPose = null;
+        let scanPoints = [];
+        let showLidar = true;
+        let scale = 1.0;
+        let offsetX = 0;
+        let offsetY = 0;
+        let isFirstLoad = true;
+
+        // Constant robot size in pixels (not affected by zoom)
+        const ROBOT_SIZE_PX = 30;
+
+        // Theme toggle
+        function toggleTheme() {
+            const html = document.documentElement;
+            const currentTheme = html.getAttribute('data-theme');
+            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+            html.setAttribute('data-theme', newTheme);
+            document.getElementById('themeIcon').textContent = newTheme === 'light' ? '🌙' : '☀️';
+            localStorage.setItem('theme', newTheme);
+            drawMap();
+        }
+
+        // Load saved theme
+        const savedTheme = localStorage.getItem('theme') || 'dark';
+        if (savedTheme === 'light') {
+            document.documentElement.setAttribute('data-theme', 'light');
+            document.getElementById('themeIcon').textContent = '🌙';
+        }
+
+        // LiDAR toggle
+        document.getElementById('showLidar').onchange = (e) => {
+            showLidar = e.target.checked;
+            drawMap();
+        };
+
+        function connect() {
+            ws = new WebSocket('ws://' + window.location.hostname + ':' + (window.location.port || '8082') + '/ws');
+
+            ws.onopen = () => {
+                statusDot.classList.remove('disconnected');
+                statusText.textContent = 'Connected';
+            };
+
+            ws.onclose = () => {
+                statusDot.classList.add('disconnected');
+                statusText.textContent = 'Disconnected. Retrying...';
+                setTimeout(connect, 1000);
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'map') {
+                        // Check if this is a different map (different dimensions)
+                        const isNewMap = !mapData ||
+                            mapData.width !== msg.width ||
+                            mapData.height !== msg.height;
+
+                        mapData = msg;
+                        mapData.image = null; // Clear cached image
+                        mapData.needsRedraw = true;
+
+                        // Reset view if it's the first load OR if it's a new map
+                        if (isFirstLoad || isNewMap) {
+                            console.log('New map detected:', msg.width, 'x', msg.height);
+                            fitToCanvas();
+                            isFirstLoad = false;
+                        }
+
+                        updateMapInfo();
+                        drawMap();
+                    } else if (msg.type === 'pose') {
+                        robotPose = msg;
+                        updatePoseInfo();
+                        drawMap();
+                    } else if (msg.type === 'scan') {
+                        scanPoints = msg.points;
+                        drawMap();
+                    }
+                } catch (e) {
+                    console.log('Non-JSON message:', event.data);
+                }
+            };
+        }
+
+        function updateMapInfo() {
+            if (mapData) {
+                document.getElementById('mapSize').textContent = `${mapData.width}×${mapData.height}`;
+            }
+        }
+
+        function updatePoseInfo() {
+            if (robotPose) {
+                document.getElementById('posX').textContent = robotPose.x.toFixed(2) + ' m';
+                document.getElementById('posY').textContent = robotPose.y.toFixed(2) + ' m';
+                document.getElementById('posTheta').textContent = (robotPose.theta * 180 / Math.PI).toFixed(1) + '°';
+            }
+        }
+
+        function fitToCanvas() {
+            if (!mapData) return;
+
+            const scaleX = canvas.width / mapData.width;
+            const scaleY = canvas.height / mapData.height;
+            scale = Math.min(scaleX, scaleY) * 0.8;
+
+            offsetX = 0;
+            offsetY = 0;
+
+            document.getElementById('scaleValue').textContent = scale.toFixed(2);
+            drawMap();
+        }
+
+        function drawMap() {
+            // Get theme colors
+            const styles = getComputedStyle(document.documentElement);
+            const bgPrimary = styles.getPropertyValue('--bg-primary').trim();
+            const bgSecondary = styles.getPropertyValue('--bg-secondary').trim();
+            const bgTertiary = styles.getPropertyValue('--bg-tertiary').trim();
+
+            // Clear with gradient background
+            const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+            gradient.addColorStop(0, bgTertiary);
+            gradient.addColorStop(0.5, bgSecondary);
+            gradient.addColorStop(1, bgPrimary);
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            if (!mapData) return;
+
+            // Define resolution once for all calculations
+            const res = mapData.resolution;
+
+            ctx.save();
+
+            // Shared Transform for Map, Robot, Lidar
+            ctx.translate(canvas.width / 2, canvas.height / 2);
+            ctx.scale(scale, scale);
+            ctx.translate(offsetX, offsetY);
+            ctx.scale(1, -1);
+
+            // Draw Map
+            if (!mapData.image || mapData.needsRedraw) {
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = mapData.width;
+                tempCanvas.height = mapData.height;
+                const tempCtx = tempCanvas.getContext('2d');
+                const imgData = tempCtx.createImageData(mapData.width, mapData.height);
+
+                // Get map colors from CSS
+                const mapFree = styles.getPropertyValue('--map-free').trim();
+                const mapOccupied = styles.getPropertyValue('--map-occupied').trim();
+                const mapUnknown = styles.getPropertyValue('--map-unknown').trim();
+
+                const freeRGB = mapFree.match(/\d+/g).map(Number);
+                const occupiedRGB = mapOccupied.match(/\d+/g).map(Number);
+                const unknownRGB = mapUnknown.match(/\d+/g).map(Number);
+
+                for (let i = 0; i < mapData.data.length; i++) {
+                    const val = mapData.data[i];
+                    const idx = i * 4;
+                    let rgb;
+
+                    if (val === 0) rgb = freeRGB;
+                    else if (val === 100) rgb = occupiedRGB;
+                    else rgb = unknownRGB;
+
+                    imgData.data[idx] = rgb[0];
+                    imgData.data[idx + 1] = rgb[1];
+                    imgData.data[idx + 2] = rgb[2];
+                    imgData.data[idx + 3] = 255;
+                }
+                tempCtx.putImageData(imgData, 0, 0);
+                mapData.image = tempCanvas;
+                mapData.needsRedraw = false;
+            }
+
+            // Map origin is in meters
+            const originX = mapData.origin.position.x / res;
+            const originY = mapData.origin.position.y / res;
+
+            ctx.drawImage(mapData.image, originX, originY, mapData.width, mapData.height);
+
+            // Draw LiDAR points (already in map frame meters from server)
+            if (showLidar && scanPoints.length > 0) {
+                ctx.fillStyle = 'rgba(255, 150, 0, 0.6)';
+                const ptSize = 3 / scale;
+                for (const [x, y] of scanPoints) {
+                    // Scan points are in meters, convert to pixels
+                    ctx.fillRect(x / res - ptSize / 2, y / res - ptSize / 2, ptSize, ptSize);
+                }
+            }
+
+            // Draw Robot
+            if (robotPose && mapData) {
+                // Robot pose is in meters, convert to pixels
+                const rx = robotPose.x / res;
+                const ry = robotPose.y / res;
+
+                ctx.save();
+                ctx.translate(rx, ry);
+                ctx.rotate(robotPose.theta);
+
+                // Robot size in pixels (constant on screen)
+                const robotRadius = (ROBOT_SIZE_PX / 2) / scale;
+
+                // Robot body (circle)
+                ctx.beginPath();
+                ctx.arc(0, 0, robotRadius, 0, Math.PI * 2);
+                ctx.fillStyle = '#667eea';
+                ctx.fill();
+
+                // Direction indicator (triangle)
+                ctx.fillStyle = '#fff';
+                ctx.beginPath();
+                ctx.moveTo(robotRadius * 1.2, 0);
+                ctx.lineTo(-robotRadius * 0.5, robotRadius * 0.5);
+                ctx.lineTo(-robotRadius * 0.5, -robotRadius * 0.5);
+                ctx.fill();
+
+                // Glow effect
+                ctx.shadowBlur = 15;
+                ctx.shadowColor = '#667eea';
+                ctx.beginPath();
+                ctx.arc(0, 0, robotRadius, 0, Math.PI * 2);
+                ctx.strokeStyle = '#a78bfa';
+                ctx.lineWidth = 2 / scale;
+                ctx.stroke();
+
+                ctx.restore();
+            }
+
+            ctx.restore();
+        }
+
+        function zoomIn() {
+            scale *= 1.2;
+            document.getElementById('scaleValue').textContent = scale.toFixed(2);
+            drawMap();
+        }
+
+        function zoomOut() {
+            scale /= 1.2;
+            document.getElementById('scaleValue').textContent = scale.toFixed(2);
+            drawMap();
+        }
+
+        function resetView() {
+            fitToCanvas();
+        }
+
+        // Panning
+        let isDragging = false;
+        let lastX, lastY;
+
+        canvas.onmousedown = (e) => {
+            isDragging = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+        };
+
+        canvas.onmouseup = () => {
+            isDragging = false;
+        };
+
+        canvas.onmouseleave = () => {
+            isDragging = false;
+        };
+
+        canvas.onmousemove = (e) => {
+            if (isDragging) {
+                const dx = e.clientX - lastX;
+                const dy = e.clientY - lastY;
+
+                offsetX += dx / scale;
+                offsetY += dy / scale;
+
+                lastX = e.clientX;
+                lastY = e.clientY;
+                drawMap();
+            }
+        };
+
+        // Joystick
+        const manager = nipplejs.create({
+            zone: document.getElementById('joystick-zone'),
+            mode: 'static',
+            position: { left: '50%', top: '50%' },
+            color: '#667eea',
+            size: 140
+        });
+
+        manager.on('move', (evt, data) => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const linear = data.vector.y * 0.5;
+                const angular = -data.vector.x * 1.0;
+
+                ws.send(JSON.stringify({
+                    type: 'cmd_vel',
+                    linear: linear,
+                    angular: angular
+                }));
+            }
+        });
+
+        manager.on('end', () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'cmd_vel', linear: 0, angular: 0 }));
+            }
+        });
+
+        // Keyboard controls (WASD)
+        let keyState = {};
+        document.addEventListener('keydown', (e) => {
+            keyState[e.key.toLowerCase()] = true;
+            updateKeyboardControl();
+        });
+
+        document.addEventListener('keyup', (e) => {
+            keyState[e.key.toLowerCase()] = false;
+            updateKeyboardControl();
+        });
+
+        function updateKeyboardControl() {
+            let linear = 0;
+            let angular = 0;
+
+            if (keyState['w']) linear += 0.5;
+            if (keyState['s']) linear -= 0.5;
+            if (keyState['a']) angular += 1.0;
+            if (keyState['d']) angular -= 1.0;
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'cmd_vel', linear, angular }));
+            }
+        }
+
+        connect();
+    </script>
+</body>
+
+</html>

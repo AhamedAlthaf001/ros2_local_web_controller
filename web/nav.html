@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ROS 2 Navigation</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+        // Apply theme immediately to prevent flash
+        (function () {
+            const savedTheme = localStorage.getItem('theme') || 'dark';
+            if (savedTheme === 'light') {
+                document.documentElement.setAttribute('data-theme', 'light');
+            }
+            document.documentElement.classList.add('theme-loaded');
+        })();
+    </script>
+    <link rel="stylesheet" href="/style.css">
+
+</head>
+
+<body>
+    <div id="header">
+        <div class="logo">
+            <span class="logo-text">ROS 2 Navigation</span>
+        </div>
+        <div class="nav-tabs">
+            <a href="/teleop" class="nav-tab">Teleoperation</a>
+            <a href="/nav" class="nav-tab active">Navigation</a>
+        </div>
+        <div id="status-badge">
+            <span class="status-dot disconnected" id="statusDot"></span>
+            <span id="statusText">Connecting...</span>
+        </div>
+        <div class="theme-toggle" onclick="toggleTheme()" title="Toggle Theme">
+            <span class="theme-icon" id="themeIcon">☀️</span>
+        </div>
+    </div>
+
+    <canvas id="mapCanvas" class="crosshair"></canvas>
+
+    <div class="panel" id="controls">
+        <div class="panel-label">Navigation Controls</div>
+        <button id="setGoalBtn" onclick="toggleGoalMode()" style="margin-bottom: 12px; width: 100%;">Set Goal</button>
+        <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">Drag map to pan, click Set Goal
+            to place navigation target</p>
+        <label class="checkbox-label">
+            <input type="checkbox" id="showPlan" checked>
+            <span>Show Global Plan</span>
+        </label>
+        <label class="checkbox-label">
+            <input type="checkbox" id="showLidar" checked>
+            <span>Show LiDAR</span>
+        </label>
+        <button onclick="zoomIn()">Zoom In (+)</button>
+        <button onclick="zoomOut()">Zoom Out (−)</button>
+        <button onclick="resetView()">Reset View</button>
+    </div>
+
+    <div class="panel" id="nav-status">
+        <div class="panel-label">Navigation Status</div>
+        <div class="status-item">
+            <span class="status-label">Goal X</span>
+            <span class="status-value" id="goalX">---</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">Goal Y</span>
+            <span class="status-value" id="goalY">---</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">Distance</span>
+            <span class="status-value" id="distance">---</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">Status</span>
+            <span class="status-value" id="navState">Idle</span>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('mapCanvas');
+        const ctx = canvas.getContext('2d');
+
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            if (typeof drawMap === 'function') drawMap();
+        });
+
+        let ws, mapData = null, robotPose = null, scanPoints = [], planPath = [];
+        let scale = 1.0, offsetX = 0, offsetY = 0, isFirstLoad = true;
+        let showPlan = true, showLidar = true, currentGoal = null;
+        const ROBOT_SIZE_PX = 30;
+
+        // Theme toggle
+        function toggleTheme() {
+            const html = document.documentElement;
+            const currentTheme = html.getAttribute('data-theme');
+            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+            html.setAttribute('data-theme', newTheme);
+            document.getElementById('themeIcon').textContent = newTheme === 'light' ? '🌙' : '☀️';
+            localStorage.setItem('theme', newTheme);
+            if (mapData) mapData.needsRedraw = true;
+            drawMap();
+        }
+
+        // Load saved theme
+        const savedTheme = localStorage.getItem('theme') || 'dark';
+        if (savedTheme === 'light') {
+            document.documentElement.setAttribute('data-theme', 'light');
+            document.getElementById('themeIcon').textContent = '🌙';
+        }
+
+        function connect() {
+            ws = new WebSocket('ws://' + window.location.hostname + ':8082/ws');
+            ws.onopen = () => { statusDot.classList.remove('disconnected'); statusText.textContent = 'Connected'; };
+            ws.onclose = () => { statusDot.classList.add('disconnected'); statusText.textContent = 'Disconnected'; setTimeout(connect, 1000); };
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'map') {
+                        // Check if this is a different map (different dimensions)
+                        const isNewMap = !mapData ||
+                            mapData.width !== msg.width ||
+                            mapData.height !== msg.height;
+
+                        mapData = msg;
+                        mapData.image = null;
+                        mapData.needsRedraw = true;
+
+                        // Reset view if it's the first load OR if it's a new map
+                        if (isFirstLoad || isNewMap) {
+                            console.log('New map detected:', msg.width, 'x', msg.height);
+                            fitToCanvas();
+                            isFirstLoad = false;
+                        }
+
+                        drawMap();
+                    }
+                    else if (msg.type === 'pose') { robotPose = msg; updateDistance(); drawMap(); }
+                    else if (msg.type === 'scan') { scanPoints = msg.points; drawMap(); }
+                    else if (msg.type === 'plan') {
+                        planPath = msg.path;
+                        console.log('Received plan with', msg.path.length, 'poses');
+                        updateDistance();
+                        drawMap();
+                    }
+                    else if (msg.type === 'nav_status') {
+                        const navStateElem = document.getElementById('navState');
+                        navStateElem.textContent = msg.status;
+                        // Update styling based on state
+                        navStateElem.classList.remove('active', 'failed');
+                        if (msg.state === 'active') navStateElem.classList.add('active');
+                        else if (msg.state === 'failed') navStateElem.classList.add('failed');
+                    }
+                } catch (e) { console.log('Non-JSON:', event.data); }
+            };
+        }
+
+        function fitToCanvas() {
+            if (!mapData) return;
+            scale = Math.min(canvas.width / mapData.width, canvas.height / mapData.height) * 0.8;
+            offsetX = offsetY = 0;
+            drawMap();
+        }
+
+        function drawMap() {
+            const styles = getComputedStyle(document.documentElement);
+            const bgPrimary = styles.getPropertyValue('--bg-primary').trim();
+            const bgSecondary = styles.getPropertyValue('--bg-secondary').trim();
+            const bgTertiary = styles.getPropertyValue('--bg-tertiary').trim();
+
+            const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+            gradient.addColorStop(0, bgTertiary);
+            gradient.addColorStop(0.5, bgSecondary);
+            gradient.addColorStop(1, bgPrimary);
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            if (!mapData) return;
+
+            // Define resolution once for all calculations
+            const res = mapData.resolution;
+
+            ctx.save();
+            // Apply shared transform for Map, Plan, Lidar, Robot, Goal
+            ctx.translate(canvas.width / 2, canvas.height / 2);
+            ctx.scale(scale, scale);
+            ctx.translate(offsetX, offsetY);
+            ctx.scale(1, -1);
+
+            if (!mapData.image || mapData.needsRedraw) {
+                const tc = document.createElement('canvas');
+                tc.width = mapData.width; tc.height = mapData.height;
+                const tctx = tc.getContext('2d');
+                const imgData = tctx.createImageData(mapData.width, mapData.height);
+
+                const mapFree = styles.getPropertyValue('--map-free').trim();
+                const mapOccupied = styles.getPropertyValue('--map-occupied').trim();
+                const mapUnknown = styles.getPropertyValue('--map-unknown').trim();
+
+                const freeRGB = mapFree.match(/\d+/g).map(Number);
+                const occupiedRGB = mapOccupied.match(/\d+/g).map(Number);
+                const unknownRGB = mapUnknown.match(/\d+/g).map(Number);
+
+                for (let i = 0; i < mapData.data.length; i++) {
+                    const val = mapData.data[i], idx = i * 4;
+                    let rgb;
+                    if (val === 0) rgb = freeRGB;
+                    else if (val === 100) rgb = occupiedRGB;
+                    else rgb = unknownRGB;
+                    imgData.data[idx] = rgb[0]; imgData.data[idx + 1] = rgb[1]; imgData.data[idx + 2] = rgb[2]; imgData.data[idx + 3] = 255;
+                }
+                tctx.putImageData(imgData, 0, 0);
+                mapData.image = tc;
+                mapData.needsRedraw = false;
+            }
+
+            ctx.drawImage(mapData.image, mapData.origin.position.x / res, mapData.origin.position.y / res, mapData.width, mapData.height);
+
+            // Draw global plan (plan points are in meters)
+            if (showPlan && planPath.length > 1) {
+                const isDark = !document.documentElement.getAttribute('data-theme') || document.documentElement.getAttribute('data-theme') === 'dark';
+                ctx.strokeStyle = isDark ? '#00d4ff' : '#0066ff';
+                ctx.lineWidth = 3 / scale;
+                ctx.beginPath();
+                for (let i = 0; i < planPath.length; i++) {
+                    const [x, y] = planPath[i];
+                    if (i === 0) ctx.moveTo(x / res, y / res);
+                    else ctx.lineTo(x / res, y / res);
+                }
+                ctx.stroke();
+            }
+
+            // Draw LiDAR (scan points are in meters from server)
+            if (showLidar && scanPoints.length > 0) {
+                ctx.fillStyle = 'rgba(255, 150, 0, 0.6)';
+                const ptSize = 3 / scale;
+                for (const [x, y] of scanPoints) {
+                    ctx.fillRect(x / res - ptSize / 2, y / res - ptSize / 2, ptSize, ptSize);
+                }
+            }
+
+            // Draw goal (goal is in meters)
+            if (currentGoal) {
+                const gx = currentGoal.x / res;
+                const gy = currentGoal.y / res;
+
+                ctx.save();
+                ctx.translate(gx, gy);
+                ctx.rotate(currentGoal.theta);
+
+                // Draw circle
+                ctx.fillStyle = '#ef4444';
+                ctx.beginPath();
+                ctx.arc(0, 0, 10 / scale, 0, Math.PI * 2);
+                ctx.fill();
+                const isDark = !document.documentElement.getAttribute('data-theme') || document.documentElement.getAttribute('data-theme') === 'dark';
+                ctx.strokeStyle = isDark ? '#fff' : '#1a202c';
+                ctx.lineWidth = 2 / scale;
+                ctx.stroke();
+
+                // Draw orientation arrow
+                const arrowLen = 20 / scale;
+                const arrowWidth = 5 / scale;
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.lineTo(arrowLen, 0);
+                ctx.lineTo(arrowLen - arrowWidth, -arrowWidth);
+                ctx.moveTo(arrowLen, 0);
+                ctx.lineTo(arrowLen - arrowWidth, arrowWidth);
+                ctx.strokeStyle = isDark ? '#fff' : '#1a202c';
+                ctx.lineWidth = 3 / scale;
+                ctx.stroke();
+
+                ctx.restore();
+            }
+
+            // Draw robot (robot pose is in meters)
+            if (robotPose && mapData) {
+                const rx = robotPose.x / res;
+                const ry = robotPose.y / res;
+
+                ctx.save();
+                ctx.translate(rx, ry);
+                ctx.rotate(robotPose.theta);
+
+                const rad = (ROBOT_SIZE_PX / 2) / scale;
+                ctx.fillStyle = '#667eea';
+                ctx.beginPath();
+                ctx.arc(0, 0, rad, 0, Math.PI * 2);
+                ctx.fill();
+
+                const isDark = !document.documentElement.getAttribute('data-theme') || document.documentElement.getAttribute('data-theme') === 'dark';
+                ctx.fillStyle = isDark ? '#fff' : '#1a202c';
+                ctx.beginPath();
+                ctx.moveTo(rad * 1.2, 0);
+                ctx.lineTo(-rad * 0.5, rad * 0.5);
+                ctx.lineTo(-rad * 0.5, -rad * 0.5);
+                ctx.fill();
+                ctx.restore();
+            }
+
+            ctx.restore();
+        }
+
+        function zoomIn() { scale *= 1.2; drawMap(); }
+        function zoomOut() { scale /= 1.2; drawMap(); }
+        function resetView() { fitToCanvas(); }
+
+        function updateDistance() {
+            if (planPath && planPath.length > 1) {
+                // Calculate total path distance
+                let totalDist = 0;
+                for (let i = 0; i < planPath.length - 1; i++) {
+                    const dx = planPath[i + 1][0] - planPath[i][0];
+                    const dy = planPath[i + 1][1] - planPath[i][1];
+                    totalDist += Math.sqrt(dx * dx + dy * dy);
+                }
+                document.getElementById('distance').textContent = totalDist.toFixed(2) + ' m';
+            } else if (currentGoal && robotPose) {
+                // Fallback to Euclidean distance if no plan yet
+                const dx = currentGoal.x - robotPose.x;
+                const dy = currentGoal.y - robotPose.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                document.getElementById('distance').textContent = dist.toFixed(2) + ' m';
+            }
+        }
+
+        // Mouse handling - pan map or set goal
+        let isDragging = false, lastX, lastY;
+        let goalMode = false;
+        let goalStartPos = null;
+
+        canvas.onmousedown = (e) => {
+            if (!mapData) return;
+            isDragging = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+
+            if (goalMode) {
+                // In goal mode - set start position
+                const rect = canvas.getBoundingClientRect();
+                const clickX = e.clientX - rect.left - canvas.width / 2;
+                const clickY = e.clientY - rect.top - canvas.height / 2;
+
+                const mapPixelX = (clickX / scale) - offsetX;
+                const mapPixelY = offsetY - (clickY / scale);
+
+                console.log('Click:', clickX, clickY, 'MapPixel:', mapPixelX, mapPixelY, 'Offset:', offsetX, offsetY);
+
+                // Check bounds
+                const originX = mapData.origin.position.x / mapData.resolution;
+                const originY = mapData.origin.position.y / mapData.resolution;
+
+                if (mapPixelX >= originX && mapPixelX <= originX + mapData.width &&
+                    mapPixelY >= originY && mapPixelY <= originY + mapData.height) {
+                    goalStartPos = {
+                        x: e.clientX,
+                        y: e.clientY,
+                        mapX: mapPixelX * mapData.resolution,
+                        mapY: mapPixelY * mapData.resolution
+                    };
+                }
+            }
+        };
+
+        canvas.onmousemove = (e) => {
+            if (!isDragging) return;
+
+            if (goalMode && goalStartPos) {
+                // Preview goal orientation
+                const dx = e.clientX - goalStartPos.x;
+                const dy = e.clientY - goalStartPos.y;
+                const theta = Math.atan2(-dy, dx);
+                currentGoal = { x: goalStartPos.mapX, y: goalStartPos.mapY, theta: theta };
+                drawMap();
+            } else if (!goalMode) {
+                // Pan map (only when NOT in goal mode)
+                offsetX += (e.clientX - lastX) / scale;
+                offsetY += (e.clientY - lastY) / scale;
+                lastX = e.clientX;
+                lastY = e.clientY;
+                drawMap();
+            }
+        };
+
+        canvas.onmouseup = (e) => {
+            if (goalMode && goalStartPos) {
+                const dx = e.clientX - goalStartPos.x;
+                const dy = e.clientY - goalStartPos.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+
+                let theta = 0;
+                if (distance > 10) {
+                    theta = Math.atan2(-dy, dx);
+                }
+
+                currentGoal = { x: goalStartPos.mapX, y: goalStartPos.mapY, theta: theta };
+                document.getElementById('goalX').textContent = currentGoal.x.toFixed(2) + ' m';
+                document.getElementById('goalY').textContent = currentGoal.y.toFixed(2) + ' m';
+                document.getElementById('navState').textContent = 'Goal Set';
+
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'set_goal', x: currentGoal.x, y: currentGoal.y, theta: theta }));
+                }
+
+                goalStartPos = null;
+                goalMode = false;
+                document.getElementById('setGoalBtn').textContent = 'Set Goal';
+                canvas.style.cursor = 'grab';
+                drawMap();
+            }
+            isDragging = false;
+        };
+
+        // Goal mode toggle
+        function toggleGoalMode() {
+            goalMode = !goalMode;
+            document.getElementById('setGoalBtn').textContent = goalMode ? 'Cancel' : 'Set Goal';
+            canvas.style.cursor = goalMode ? 'crosshair' : 'grab';
+        }
+
+        document.getElementById('showPlan').onchange = (e) => { showPlan = e.target.checked; drawMap(); };
+        document.getElementById('showLidar').onchange = (e) => { showLidar = e.target.checked; drawMap(); };
+
+        connect();
+    </script>
+</body>
+
+</html>
