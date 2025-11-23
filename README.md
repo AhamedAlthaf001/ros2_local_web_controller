@@ -371,6 +371,10 @@ When contributing new features:
 
 ## 📄 License
 
+This project is licensed under the **Apache License 2.0** - see the [LICENSE](LICENSE) file for details.
+
+Copyright 2025 Ahamed Althaf
+
 [Specify your license here]
 
 ## 🙏 Acknowledgments
@@ -383,5 +387,5 @@ When contributing new features:
 
 **Version**: 1.0.0  
 **ROS 2 Distribution**: Jazzy  
-**Maintainer**: [Your Name]  
+**Maintainer**: [Ahamed Althaf]  
 **Last Updated**: 2025-11-23
