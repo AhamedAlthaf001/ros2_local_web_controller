@@ -3,9 +3,11 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
+#include "nav2_msgs/action/navigate_to_pose.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp_action/rclcpp_action.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2_ros/buffer.h"
@@ -216,12 +218,17 @@ public:
         plan_topic_, 10,
         std::bind(&MapViewerNode::plan_callback, this, std::placeholders::_1));
 
+    // Create publishers
     goal_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
         goal_topic_, 10);
-
     initial_pose_pub_ =
         this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
             initial_pose_topic_, 10);
+
+    // Create action client for canceling navigation goals
+    nav_action_client_ =
+        rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
+            this, "navigate_to_pose");
 
     // Subscribe to Nav2 action status
     goal_status_sub_ =
@@ -926,6 +933,37 @@ private:
                           "Published initial pose: x=%.2f, y=%.2f, theta=%.2f",
                           initial_pose_msg.pose.pose.position.x,
                           initial_pose_msg.pose.pose.position.y, theta);
+            } else if (x.has("type") && x["type"].s() == "emergency_stop") {
+              RCLCPP_WARN(this->get_logger(), "EMERGENCY STOP ACTIVATED!");
+
+              // Publish zero velocity
+              auto stop_msg = geometry_msgs::msg::TwistStamped();
+              stop_msg.header.stamp = this->now();
+              stop_msg.header.frame_id = base_link_frame_;
+              stop_msg.twist.linear.x = 0.0;
+              stop_msg.twist.linear.y = 0.0;
+              stop_msg.twist.linear.z = 0.0;
+              stop_msg.twist.angular.x = 0.0;
+              stop_msg.twist.angular.y = 0.0;
+              stop_msg.twist.angular.z = 0.0;
+
+              // Publish multiple times to ensure it's received
+              for (int i = 0; i < 10; i++) {
+                cmd_vel_pub_->publish(stop_msg);
+                // Small delay to ensure messages are sent
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+              }
+
+              // Cancel all navigation goals using action client
+              if (nav_action_client_) {
+                auto cancel_future =
+                    nav_action_client_->async_cancel_all_goals();
+                RCLCPP_WARN(this->get_logger(),
+                            "Emergency stop - canceling all navigation goals");
+              } else {
+                RCLCPP_WARN(this->get_logger(),
+                            "Emergency stop - action client not ready");
+              }
             }
           } catch (const std::exception &e) {
             RCLCPP_ERROR(this->get_logger(), "Error parsing JSON: %s",
@@ -1166,6 +1204,8 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
       initial_pose_pub_;
+  rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr
+      nav_action_client_;
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

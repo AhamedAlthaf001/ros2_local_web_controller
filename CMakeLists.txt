@@ -15,20 +15,23 @@ find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(action_msgs REQUIRED)
-find_package(ament_index_cpp REQUIRED)   
+find_package(ament_index_cpp REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(nav2_msgs REQUIRED)
+find_package(rclcpp_action REQUIRED)
 
 
 
 add_executable(map_viewer_node src/map_viewer_node.cpp)
 target_include_directories(map_viewer_node PUBLIC include)
-target_link_libraries(map_viewer_node pthread)
-ament_target_dependencies(map_viewer_node rclcpp nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs action_msgs ament_index_cpp)
+target_link_libraries(map_viewer_node pthread OpenSSL::Crypto)
+ament_target_dependencies(map_viewer_node rclcpp nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs action_msgs ament_index_cpp nav2_msgs rclcpp_action)
 
 install(TARGETS  map_viewer_node
   DESTINATION lib/${PROJECT_NAME})
 
-# Install config, launch, and web directories
-install(DIRECTORY config launch web
+# Install config, launch, web, and scripts directories
+install(DIRECTORY config launch web scripts
   DESTINATION share/${PROJECT_NAME}/
   USE_SOURCE_PERMISSIONS)
 

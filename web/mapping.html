@@ -44,6 +44,9 @@
                 <span class="status-dot disconnected" id="statusDot"></span>
                 <span id="statusText">Connecting...</span>
             </div>
+            <button id="emergencyStopBtn" onclick="emergencyStop()"
+                style="background: #dc2626; color: white; font-weight: 700; padding: 10px 20px; margin-left: auto; margin-right: 15px; border: 2px solid #991b1b; box-shadow: 0 4px 6px rgba(220, 38, 38, 0.3); border-radius: 8px; cursor: pointer;"
+                title="Emergency Stop (Spacebar)">⚠️ E-STOP</button>
             <div class="theme-toggle" onclick="toggleTheme()" title="Toggle Theme">
                 <span class="theme-icon" id="themeIcon">☀️</span>
             </div>
@@ -204,6 +207,43 @@
         function hideLoading() {
             document.getElementById('loading-overlay').style.display = 'none';
         }
+
+        // Emergency stop function
+        function emergencyStop() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'cmd_vel', linear: 0, angular: 0 }));
+                ws.send(JSON.stringify({ type: 'emergency_stop' }));
+                showToast('Emergency stop activated!', 'error');
+            } else {
+                showToast('Not connected to robot', 'error');
+            }
+        }
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+            switch (e.key.toLowerCase()) {
+                case ' ':  // Spacebar - Emergency stop
+                    e.preventDefault();
+                    emergencyStop();
+                    break;
+                case '+':
+                case '=':
+                    e.preventDefault();
+                    zoomIn();
+                    break;
+                case '-':
+                case '_':
+                    e.preventDefault();
+                    zoomOut();
+                    break;
+                case 'r':
+                    e.preventDefault();
+                    resetView();
+                    break;
+            }
+        });
 
         // LiDAR toggle
         document.getElementById('showLidar').onchange = (e) => {
@@ -580,7 +620,10 @@
                     showToast('Failed to start mapping', 'error');
                 }
             } else {
-                // Stop mapping
+                // Stop mapping with confirmation
+                if (!confirm('Stop mapping? Current map progress will be lost if not saved.')) {
+                    return;
+                }
                 btn.textContent = 'Stopping...';
                 btn.disabled = true;
                 try {
