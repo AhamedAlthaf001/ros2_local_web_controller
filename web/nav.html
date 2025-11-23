@@ -55,7 +55,12 @@
             style="margin-bottom: 12px; width: 100%; background: var(--primary-color);">
             Start Navigation
         </button>
-        <button id="setGoalBtn" onclick="toggleGoalMode()" style="margin-bottom: 12px; width: 100%;">Set Goal</button>
+        <div class="control-group">
+            <button id="setGoalBtn" onclick="toggleGoalMode()">Set Goal</button>
+            <button id="setPoseBtn" onclick="togglePoseMode()"
+                style="background: linear-gradient(135deg, #f6d365 0%, #fda085 100%); margin-top: 10px;">Set Initial
+                Pose</button>
+        </div>
         <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">Drag map to pan, click Set Goal
             to place navigation target</p>
         <label class="checkbox-label">
@@ -380,6 +385,7 @@
         // Mouse handling - pan map or set goal
         let isDragging = false, lastX, lastY;
         let goalMode = false;
+        let poseMode = false;
         let goalStartPos = null;
 
         canvas.onmousedown = (e) => {
@@ -388,7 +394,7 @@
             lastX = e.clientX;
             lastY = e.clientY;
 
-            if (goalMode) {
+            if (goalMode || poseMode) {
                 // In goal mode - set start position
                 const rect = canvas.getBoundingClientRect();
                 const clickX = e.clientX - rect.left - canvas.width / 2;
@@ -415,9 +421,9 @@
                         mapX: mapPixelX * mapData.resolution,
                         mapY: mapPixelY * mapData.resolution
                     };
-                    console.log('Goal start position set:', goalStartPos);
+                    console.log('Start position set:', goalStartPos);
                 } else {
-                    console.log('Click outside map bounds - goal not set');
+                    console.log('Click outside map bounds');
                 }
             }
         };
@@ -425,15 +431,17 @@
         canvas.onmousemove = (e) => {
             if (!isDragging) return;
 
-            if (goalMode && goalStartPos) {
-                // Preview goal orientation
+            if ((goalMode || poseMode) && goalStartPos) {
+                // Preview orientation
                 const dx = e.clientX - goalStartPos.x;
                 const dy = e.clientY - goalStartPos.y;
                 const theta = Math.atan2(-dy, dx);
+
+                // We reuse currentGoal for visualization of the arrow
                 currentGoal = { x: goalStartPos.mapX, y: goalStartPos.mapY, theta: theta };
                 drawMap();
-            } else if (!goalMode) {
-                // Pan map (only when NOT in goal mode)
+            } else if (!goalMode && !poseMode) {
+                // Pan map
                 offsetX += (e.clientX - lastX) / scale;
                 offsetY += (e.clientY - lastY) / scale;
                 lastX = e.clientX;
@@ -443,7 +451,7 @@
         };
 
         canvas.onmouseup = (e) => {
-            if (goalMode && goalStartPos) {
+            if ((goalMode || poseMode) && goalStartPos) {
                 const dx = e.clientX - goalStartPos.x;
                 const dy = e.clientY - goalStartPos.y;
                 const distance = Math.sqrt(dx * dx + dy * dy);
@@ -453,24 +461,39 @@
                     theta = Math.atan2(-dy, dx);
                 }
 
-                currentGoal = { x: goalStartPos.mapX, y: goalStartPos.mapY, theta: theta };
-                document.getElementById('goalX').textContent = currentGoal.x.toFixed(2) + ' m';
-                document.getElementById('goalY').textContent = currentGoal.y.toFixed(2) + ' m';
-                document.getElementById('navState').textContent = 'Goal Set';
+                const targetX = goalStartPos.mapX;
+                const targetY = goalStartPos.mapY;
 
-                console.log('WebSocket state:', ws.readyState, 'OPEN=', WebSocket.OPEN);
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    const goalMsg = { type: 'set_goal', x: currentGoal.x, y: currentGoal.y, theta: theta };
-                    console.log('Sending goal to server:', goalMsg);
-                    ws.send(JSON.stringify(goalMsg));
+                    if (goalMode) {
+                        const goalMsg = { type: 'set_goal', x: targetX, y: targetY, theta: theta };
+                        console.log('Sending goal:', goalMsg);
+                        ws.send(JSON.stringify(goalMsg));
+                        document.getElementById('goalX').textContent = targetX.toFixed(2) + ' m';
+                        document.getElementById('goalY').textContent = targetY.toFixed(2) + ' m';
+                        document.getElementById('navState').textContent = 'Goal Set';
+                    } else if (poseMode) {
+                        const poseMsg = { type: 'set_initial_pose', x: targetX, y: targetY, theta: theta };
+                        console.log('Sending initial pose:', poseMsg);
+                        ws.send(JSON.stringify(poseMsg));
+                        document.getElementById('navState').textContent = 'Initial Pose Set';
+                    }
                 } else {
-                    console.error('WebSocket not open! State:', ws ? ws.readyState : 'null');
+                    console.error('WebSocket not open!');
                 }
 
                 goalStartPos = null;
-                goalMode = false;
-                document.getElementById('setGoalBtn').textContent = 'Set Goal';
-                canvas.style.cursor = 'grab';
+                if (goalMode) toggleGoalMode();
+                if (poseMode) togglePoseMode();
+                // currentGoal = null; // Keep the goal visible!
+
+                // If we set initial pose, we might want to clear the goal visualization
+                // or maybe just leave it as the "last set point"
+                if (poseMode) {
+                    // For initial pose, maybe we don't want to show a "goal" arrow permanently?
+                    // But user asked for "dot and arrow", so let's keep it for now.
+                }
+
                 drawMap();
             }
             isDragging = false;
@@ -479,8 +502,27 @@
         // Goal mode toggle
         function toggleGoalMode() {
             goalMode = !goalMode;
-            document.getElementById('setGoalBtn').textContent = goalMode ? 'Cancel' : 'Set Goal';
-            canvas.style.cursor = goalMode ? 'crosshair' : 'grab';
+            if (goalMode) poseMode = false; // Exclusive modes
+            updateButtonStates();
+        }
+
+        function togglePoseMode() {
+            poseMode = !poseMode;
+            if (poseMode) goalMode = false; // Exclusive modes
+            updateButtonStates();
+        }
+
+        function updateButtonStates() {
+            document.getElementById('setGoalBtn').textContent = goalMode ? 'Cancel Goal' : 'Set Goal';
+            document.getElementById('setGoalBtn').classList.toggle('active', goalMode);
+
+            const poseBtn = document.getElementById('setPoseBtn');
+            if (poseBtn) {
+                poseBtn.textContent = poseMode ? 'Cancel Pose' : 'Set Initial Pose';
+                poseBtn.classList.toggle('active', poseMode);
+            }
+
+            canvas.style.cursor = (goalMode || poseMode) ? 'crosshair' : 'grab';
         }
 
         document.getElementById('showPlan').onchange = (e) => { showPlan = e.target.checked; drawMap(); };

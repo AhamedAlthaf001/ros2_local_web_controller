@@ -1,6 +1,7 @@
 #include "action_msgs/msg/goal_status_array.hpp"
 #include "crow_all.h"
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/path.hpp"
@@ -43,14 +44,22 @@ public:
 
   void stop_process(pid_t pid) {
     if (pid > 0) {
-      // Kill the process group
+      // Kill the process group with SIGINT (Ctrl+C equivalent)
       kill(-pid, SIGINT);
-      // Wait a bit for graceful shutdown
-      std::this_thread::sleep_for(std::chrono::seconds(2));
-      // Force kill if needed (optional, but good for robustness)
-      // kill(-pid, SIGKILL);
+
+      // Wait for process to exit (up to 10 seconds)
       int status;
-      waitpid(pid, &status, WNOHANG);
+      for (int i = 0; i < 100; ++i) {
+        pid_t result = waitpid(pid, &status, WNOHANG);
+        if (result == pid) {
+          return; // Process exited
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+
+      // If still running, force kill
+      kill(-pid, SIGKILL);
+      waitpid(pid, &status, 0);
     }
   }
 };
@@ -95,10 +104,14 @@ public:
     this->declare_parameter("scan_topic", "/scan");
     this->declare_parameter("plan_topic", "/plan");
     this->declare_parameter("goal_topic", "/goal_pose");
+    this->declare_parameter("initial_pose_topic", "/initialpose");
     this->declare_parameter("map_frame", "map");
     this->declare_parameter("base_link_frame", "base_link");
+    this->declare_parameter("tf_prefix", "");
     this->declare_parameter("port", 8082);
     this->declare_parameter("env_file_path", "");
+    this->declare_parameter("max_linear_velocity", 0.2);
+    this->declare_parameter("max_angular_velocity", 0.2);
 
     // Launch Commands
     this->declare_parameter("mapping_launch_cmd",
@@ -115,9 +128,18 @@ public:
     scan_topic_ = this->get_parameter("scan_topic").as_string();
     plan_topic_ = this->get_parameter("plan_topic").as_string();
     goal_topic_ = this->get_parameter("goal_topic").as_string();
+    initial_pose_topic_ = this->get_parameter("initial_pose_topic").as_string();
     map_frame_ = this->get_parameter("map_frame").as_string();
+    tf_prefix_ = this->get_parameter("tf_prefix").as_string();
     base_link_frame_ = this->get_parameter("base_link_frame").as_string();
+    if (tf_prefix_ != "") {
+      base_link_frame_ = tf_prefix_ + "/" + base_link_frame_;
+    }
     port_ = this->get_parameter("port").as_int();
+    max_linear_velocity_ =
+        this->get_parameter("max_linear_velocity").as_double();
+    max_angular_velocity_ =
+        this->get_parameter("max_angular_velocity").as_double();
     std::string env_path = this->get_parameter("env_file_path").as_string();
 
     mapping_cmd_ = this->get_parameter("mapping_launch_cmd").as_string();
@@ -134,9 +156,19 @@ public:
     RCLCPP_INFO(this->get_logger(), "  Map topic: %s", map_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "  Cmd_vel topic: %s",
                 cmd_vel_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "  Scan topic: %s", scan_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "  Plan topic: %s", plan_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "  Goal topic: %s", goal_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "  Initial pose topic: %s",
+                initial_pose_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "  Frames: %s -> %s", map_frame_.c_str(),
                 base_link_frame_.c_str());
+    RCLCPP_INFO(this->get_logger(), "  TF prefix: %s", tf_prefix_.c_str());
     RCLCPP_INFO(this->get_logger(), "  Map folder: %s", map_folder_.c_str());
+    RCLCPP_INFO(this->get_logger(), "  Max linear velocity: %f",
+                max_linear_velocity_);
+    RCLCPP_INFO(this->get_logger(), "  Max angular velocity: %f",
+                max_angular_velocity_);
 
     // Load .env file
     if (env_path.empty()) {
@@ -186,6 +218,10 @@ public:
 
     goal_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
         goal_topic_, 10);
+
+    initial_pose_pub_ =
+        this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
+            initial_pose_topic_, 10);
 
     // Subscribe to Nav2 action status
     goal_status_sub_ =
@@ -795,7 +831,11 @@ private:
               } else {
                 RCLCPP_WARN(this->get_logger(),
                             "Invalid auth token. Closing connection.");
-                conn.close("Invalid authentication");
+                crow::json::wvalue x;
+                x["type"] = "error";
+                x["message"] = "Invalid authentication";
+                conn.send_text(x.dump());
+                // conn.close("Invalid authentication"); // Causes crash
               }
               return;
             }
@@ -820,12 +860,16 @@ private:
               // Robust parsing for linear and angular
               if (x.has("linear")) {
                 if (x["linear"].t() == crow::json::type::Number)
-                  msg.twist.linear.x = x["linear"].d();
+                  msg.twist.linear.x =
+                      std::max(std::min(max_linear_velocity_, x["linear"].d()),
+                               -max_linear_velocity_);
               }
 
               if (x.has("angular")) {
                 if (x["angular"].t() == crow::json::type::Number)
-                  msg.twist.angular.z = x["angular"].d();
+                  msg.twist.angular.z = std::max(
+                      std::min(max_angular_velocity_, x["angular"].d()),
+                      -max_angular_velocity_);
               }
 
               cmd_vel_pub_->publish(msg);
@@ -855,6 +899,33 @@ private:
                           "Published goal: x=%.2f, y=%.2f, theta=%.2f",
                           goal_msg.pose.position.x, goal_msg.pose.position.y,
                           theta);
+            } else if (x.has("type") && x["type"].s() == "set_initial_pose") {
+              RCLCPP_INFO(this->get_logger(),
+                          "Received set_initial_pose message from WebSocket");
+              // Publish initial pose
+              auto initial_pose_msg =
+                  geometry_msgs::msg::PoseWithCovarianceStamped();
+              initial_pose_msg.header.stamp = this->now();
+              initial_pose_msg.header.frame_id = map_frame_;
+
+              if (x.has("x") && x["x"].t() == crow::json::type::Number)
+                initial_pose_msg.pose.pose.position.x = x["x"].d();
+              if (x.has("y") && x["y"].t() == crow::json::type::Number)
+                initial_pose_msg.pose.pose.position.y = x["y"].d();
+
+              // Set orientation from theta
+              double theta = 0.0;
+              if (x.has("theta") && x["theta"].t() == crow::json::type::Number)
+                theta = x["theta"].d();
+
+              initial_pose_msg.pose.pose.orientation.z = std::sin(theta / 2.0);
+              initial_pose_msg.pose.pose.orientation.w = std::cos(theta / 2.0);
+
+              initial_pose_pub_->publish(initial_pose_msg);
+              RCLCPP_INFO(this->get_logger(),
+                          "Published initial pose: x=%.2f, y=%.2f, theta=%.2f",
+                          initial_pose_msg.pose.pose.position.x,
+                          initial_pose_msg.pose.pose.position.y, theta);
             }
           } catch (const std::exception &e) {
             RCLCPP_ERROR(this->get_logger(), "Error parsing JSON: %s",
@@ -1093,6 +1164,8 @@ private:
       goal_status_sub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
+      initial_pose_pub_;
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -1103,9 +1176,14 @@ private:
   std::string scan_topic_;
   std::string plan_topic_;
   std::string goal_topic_;
+  std::string initial_pose_topic_;
   std::string map_frame_;
   std::string base_link_frame_;
+  std::string tf_prefix_;
   int port_;
+
+  double max_linear_velocity_;
+  double max_angular_velocity_;
 
   std::mutex mtx_;
 

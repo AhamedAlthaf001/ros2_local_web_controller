@@ -2,15 +2,21 @@ map_viewer_node:
   ros__parameters:
     # Topic names
     map_topic: "/map"
-    cmd_vel_topic: "/cmd_vel"
-    scan_topic: "/scan"
-    plan_topic: "/plan"  # Nav2 planner output
-    goal_topic: "/goal_pose"
+    cmd_vel_topic: "cmd_vel"
+    scan_topic: "scan"
+    plan_topic: "plan"  # Nav2 planner output
+    goal_topic: "goal_pose"
+    initial_pose_topic: "initialpose"
     
     # Frame names
     map_frame: "map"
     map_folder: "/home/linux/test_ws/src/web_test/maps"
     base_link_frame: "base_link"
+    tf_prefix: ""
+
+    # Velocities
+    max_linear_velocity: 0.2
+    max_angular_velocity: 0.2
     
     # Server configuration
     port: 8082
