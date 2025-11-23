@@ -221,6 +221,11 @@
             }
         });
 
+        let reconnectAttempts = 0;
+        let reconnectTimeout = null;
+        const MAX_RECONNECT_DELAY = 30000; // 30 seconds
+        const INITIAL_RECONNECT_DELAY = 1000; // 1 second
+
         function getCookie(name) {
             const value = `; ${document.cookie}`;
             const parts = value.split(`; ${name}=`);
@@ -232,6 +237,13 @@
             const port = window.location.port ? window.location.port : (window.location.protocol === 'https:' ? 443 : 80);
             ws = new WebSocket(protocol + window.location.hostname + ':' + port + '/ws');
             ws.onopen = () => {
+                // Reset reconnect attempts on successful connection
+                reconnectAttempts = 0;
+                if (reconnectTimeout) {
+                    clearTimeout(reconnectTimeout);
+                    reconnectTimeout = null;
+                }
+
                 document.getElementById('statusDot').classList.remove('disconnected');
                 document.getElementById('statusText').textContent = 'Connected';
 
@@ -248,10 +260,30 @@
             };
             ws.onclose = (event) => {
                 statusDot.classList.add('disconnected');
-                statusText.textContent = 'Disconnected: ' + (event.reason || 'Retrying...');
-                if (event.reason !== "Connection replaced by new session" && event.reason !== "Invalid authentication") {
-                    setTimeout(connect, 1000);
+
+                // Don't auto-reconnect for these reasons
+                if (event.reason === "Connection replaced by new session" ||
+                    event.reason === "Invalid authentication") {
+                    statusText.textContent = 'Disconnected: ' + event.reason;
+                    return;
                 }
+
+                // Calculate exponential backoff delay
+                const delay = Math.min(
+                    INITIAL_RECONNECT_DELAY * Math.pow(2, reconnectAttempts),
+                    MAX_RECONNECT_DELAY
+                );
+                reconnectAttempts++;
+
+                const seconds = Math.ceil(delay / 1000);
+                statusText.textContent = `Reconnecting in ${seconds}s... (attempt ${reconnectAttempts})`;
+
+                // Clear any pending reconnect
+                if (reconnectTimeout) clearTimeout(reconnectTimeout);
+
+                reconnectTimeout = setTimeout(() => {
+                    connect();
+                }, delay);
             };
             ws.onmessage = (event) => {
                 try {

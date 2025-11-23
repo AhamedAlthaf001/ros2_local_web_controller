@@ -860,79 +860,134 @@ private:
             }
 
             if (x.has("type") && x["type"].s() == "cmd_vel") {
+              // Validate required fields and types
+              if (!x.has("linear") || !x.has("angular")) {
+                RCLCPP_WARN(this->get_logger(),
+                            "cmd_vel missing required fields");
+                return;
+              }
+
+              if (x["linear"].t() != crow::json::type::Number ||
+                  x["angular"].t() != crow::json::type::Number) {
+                RCLCPP_WARN(this->get_logger(),
+                            "cmd_vel fields must be numbers");
+                return;
+              }
+
+              double linear = x["linear"].d();
+              double angular = x["angular"].d();
+
+              // Validate ranges
+              if (std::isnan(linear) || std::isinf(linear) ||
+                  std::isnan(angular) || std::isinf(angular)) {
+                RCLCPP_WARN(this->get_logger(),
+                            "cmd_vel contains invalid numeric values");
+                return;
+              }
+
               auto msg = geometry_msgs::msg::TwistStamped();
               msg.header.stamp = this->now();
               msg.header.frame_id = base_link_frame_;
 
-              // Robust parsing for linear and angular
-              if (x.has("linear")) {
-                if (x["linear"].t() == crow::json::type::Number)
-                  msg.twist.linear.x =
-                      std::max(std::min(max_linear_velocity_, x["linear"].d()),
-                               -max_linear_velocity_);
-              }
-
-              if (x.has("angular")) {
-                if (x["angular"].t() == crow::json::type::Number)
-                  msg.twist.angular.z = std::max(
-                      std::min(max_angular_velocity_, x["angular"].d()),
-                      -max_angular_velocity_);
-              }
+              // Clamp to safe limits
+              msg.twist.linear.x =
+                  std::max(std::min(max_linear_velocity_, linear),
+                           -max_linear_velocity_);
+              msg.twist.angular.z =
+                  std::max(std::min(max_angular_velocity_, angular),
+                           -max_angular_velocity_);
 
               cmd_vel_pub_->publish(msg);
             } else if (x.has("type") && x["type"].s() == "set_goal") {
+              // Validate required fields
+              if (!x.has("x") || !x.has("y") || !x.has("theta")) {
+                RCLCPP_WARN(this->get_logger(),
+                            "set_goal missing required fields (x, y, theta)");
+                return;
+              }
+
+              if (x["x"].t() != crow::json::type::Number ||
+                  x["y"].t() != crow::json::type::Number ||
+                  x["theta"].t() != crow::json::type::Number) {
+                RCLCPP_WARN(this->get_logger(),
+                            "set_goal fields must be numbers");
+                return;
+              }
+
+              double goal_x = x["x"].d();
+              double goal_y = x["y"].d();
+              double theta = x["theta"].d();
+
+              // Validate numeric values
+              if (std::isnan(goal_x) || std::isinf(goal_x) ||
+                  std::isnan(goal_y) || std::isinf(goal_y) ||
+                  std::isnan(theta) || std::isinf(theta)) {
+                RCLCPP_WARN(this->get_logger(),
+                            "set_goal contains invalid numeric values");
+                return;
+              }
+
               RCLCPP_INFO(this->get_logger(),
                           "Received set_goal message from WebSocket");
-              // Publish navigation goal
+
               auto goal_msg = geometry_msgs::msg::PoseStamped();
               goal_msg.header.stamp = this->now();
               goal_msg.header.frame_id = map_frame_;
-
-              if (x.has("x") && x["x"].t() == crow::json::type::Number)
-                goal_msg.pose.position.x = x["x"].d();
-              if (x.has("y") && x["y"].t() == crow::json::type::Number)
-                goal_msg.pose.position.y = x["y"].d();
-
-              // Set orientation from theta
-              double theta = 0.0;
-              if (x.has("theta") && x["theta"].t() == crow::json::type::Number)
-                theta = x["theta"].d();
-
+              goal_msg.pose.position.x = goal_x;
+              goal_msg.pose.position.y = goal_y;
               goal_msg.pose.orientation.z = std::sin(theta / 2.0);
               goal_msg.pose.orientation.w = std::cos(theta / 2.0);
 
               goal_pub_->publish(goal_msg);
               RCLCPP_INFO(this->get_logger(),
-                          "Published goal: x=%.2f, y=%.2f, theta=%.2f",
-                          goal_msg.pose.position.x, goal_msg.pose.position.y,
-                          theta);
+                          "Published goal: x=%.2f, y=%.2f, theta=%.2f", goal_x,
+                          goal_y, theta);
             } else if (x.has("type") && x["type"].s() == "set_initial_pose") {
+              // Validate required fields
+              if (!x.has("x") || !x.has("y") || !x.has("theta")) {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "set_initial_pose missing required fields (x, y, theta)");
+                return;
+              }
+
+              if (x["x"].t() != crow::json::type::Number ||
+                  x["y"].t() != crow::json::type::Number ||
+                  x["theta"].t() != crow::json::type::Number) {
+                RCLCPP_WARN(this->get_logger(),
+                            "set_initial_pose fields must be numbers");
+                return;
+              }
+
+              double pose_x = x["x"].d();
+              double pose_y = x["y"].d();
+              double theta = x["theta"].d();
+
+              // Validate numeric values
+              if (std::isnan(pose_x) || std::isinf(pose_x) ||
+                  std::isnan(pose_y) || std::isinf(pose_y) ||
+                  std::isnan(theta) || std::isinf(theta)) {
+                RCLCPP_WARN(this->get_logger(),
+                            "set_initial_pose contains invalid numeric values");
+                return;
+              }
+
               RCLCPP_INFO(this->get_logger(),
                           "Received set_initial_pose message from WebSocket");
-              // Publish initial pose
+
               auto initial_pose_msg =
                   geometry_msgs::msg::PoseWithCovarianceStamped();
               initial_pose_msg.header.stamp = this->now();
               initial_pose_msg.header.frame_id = map_frame_;
-
-              if (x.has("x") && x["x"].t() == crow::json::type::Number)
-                initial_pose_msg.pose.pose.position.x = x["x"].d();
-              if (x.has("y") && x["y"].t() == crow::json::type::Number)
-                initial_pose_msg.pose.pose.position.y = x["y"].d();
-
-              // Set orientation from theta
-              double theta = 0.0;
-              if (x.has("theta") && x["theta"].t() == crow::json::type::Number)
-                theta = x["theta"].d();
-
+              initial_pose_msg.pose.pose.position.x = pose_x;
+              initial_pose_msg.pose.pose.position.y = pose_y;
               initial_pose_msg.pose.pose.orientation.z = std::sin(theta / 2.0);
               initial_pose_msg.pose.pose.orientation.w = std::cos(theta / 2.0);
 
               initial_pose_pub_->publish(initial_pose_msg);
               RCLCPP_INFO(this->get_logger(),
                           "Published initial pose: x=%.2f, y=%.2f, theta=%.2f",
-                          initial_pose_msg.pose.pose.position.x,
-                          initial_pose_msg.pose.pose.position.y, theta);
+                          pose_x, pose_y, theta);
             } else if (x.has("type") && x["type"].s() == "emergency_stop") {
               RCLCPP_WARN(this->get_logger(), "EMERGENCY STOP ACTIVATED!");
 
