@@ -4,7 +4,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ROS 2 Navigation</title>
+    <title>ROS 2 Web Controller</title>
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -25,7 +27,7 @@
 <body>
     <div id="header">
         <div class="logo">
-            <span class="logo-text">ROS 2 Navigation</span>
+            <span class="logo-text">ROS 2 Web Controller</span>
         </div>
         <div class="nav-tabs">
             <a href="/mapping.html" class="nav-tab">Mapping</a>
@@ -76,6 +78,20 @@
         <button onclick="resetView()">Reset View</button>
     </div>
 
+    <!-- Toast Container -->
+    <div id="toast-container" style="position: fixed; top: 20px; right: 20px; z-index: 10000;"></div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay"
+        style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 9999; align-items: center; justify-content: center;">
+        <div style="background: var(--bg-secondary); padding: 30px; border-radius: 12px; text-align: center;">
+            <div class="spinner"
+                style="width: 50px; height: 50px; border: 4px solid var(--border-color); border-top-color: var(--primary-color); border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 15px;">
+            </div>
+            <p style="color: var(--text-primary); margin: 0;">Loading map...</p>
+        </div>
+    </div>
+
     <div class="panel" id="nav-status">
         <div class="panel-label">Navigation Status</div>
         <div class="status-item">
@@ -93,6 +109,10 @@
         <div class="status-item">
             <span class="status-label">Status</span>
             <span class="status-value" id="navState">Idle</span>
+        </div>
+        <div
+            style="margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border-color); text-align: center;">
+            <small style="color: var(--text-secondary); font-size: 11px;">v1.0.0</small>
         </div>
     </div>
 
@@ -132,6 +152,24 @@
             document.getElementById('themeIcon').textContent = '🌙';
         }
 
+        // Toast notification system
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = message;
+            container.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
+        // Loading overlay
+        function showLoading() {
+            document.getElementById('loading-overlay').style.display = 'flex';
+        }
+        function hideLoading() {
+            document.getElementById('loading-overlay').style.display = 'none';
+        }
+
         function getCookie(name) {
             const value = `; ${document.cookie}`;
             const parts = value.split(`; ${name}=`);
@@ -143,15 +181,15 @@
             const port = window.location.port ? window.location.port : (window.location.protocol === 'https:' ? 443 : 80);
             ws = new WebSocket(protocol + window.location.hostname + ':' + port + '/ws');
             ws.onopen = () => {
-                statusDot.classList.remove('disconnected');
-                statusText.textContent = 'Connected';
+                document.getElementById('statusDot').classList.remove('disconnected');
+                document.getElementById('statusText').textContent = 'Connected';
 
-                // Authenticate
-                const token = getCookie('session_token');
-                console.log('WebSocket Open. Token found:', token ? 'YES' : 'NO', token);
+                const cookies = document.cookie.split('; ');
+                const sessionCookie = cookies.find(row => row.startsWith('session_token='));
+                const token = sessionCookie ? sessionCookie.split('=')[1] : null;
+
                 if (token) {
                     const authMsg = { type: 'auth', token: token };
-                    console.log('Sending auth message:', authMsg);
                     ws.send(JSON.stringify(authMsg));
                 } else {
                     console.warn('No session token found! WebSocket will not be authenticated.');
@@ -186,7 +224,6 @@
 
                         // Reset view if it's the first load OR if it's a new map
                         if (isFirstLoad || isNewMap) {
-                            console.log('New map detected:', msg.width, 'x', msg.height);
                             fitToCanvas();
                             isFirstLoad = false;
                         }
@@ -197,7 +234,6 @@
                     else if (msg.type === 'scan') { scanPoints = msg.points; drawMap(); }
                     else if (msg.type === 'plan') {
                         planPath = msg.path;
-                        console.log('Received plan with', msg.path.length, 'poses');
                         updateDistance();
                         drawMap();
                     }
@@ -209,7 +245,7 @@
                         if (msg.state === 'active') navStateElem.classList.add('active');
                         else if (msg.state === 'failed') navStateElem.classList.add('failed');
                     }
-                } catch (e) { console.log('Non-JSON:', event.data); }
+                } catch (e) { /* Ignore non-JSON messages */ }
             };
         }
 
@@ -383,10 +419,13 @@
         }
 
         // Mouse handling - pan map or set goal
+        // Mouse handling - pan map or set goal
         let isDragging = false, lastX, lastY;
         let goalMode = false;
         let poseMode = false;
         let goalStartPos = null;
+
+        // Register event handlers after defining helper functions
 
         canvas.onmousedown = (e) => {
             if (!mapData) return;
@@ -403,27 +442,11 @@
                 const mapPixelX = (clickX / scale) - offsetX;
                 const mapPixelY = offsetY - (clickY / scale);
 
-                console.log('Click:', clickX, clickY, 'MapPixel:', mapPixelX, mapPixelY, 'Offset:', offsetX, offsetY);
-
                 // Check bounds
                 const originX = mapData.origin.position.x / mapData.resolution;
-                const originY = mapData.origin.position.y / mapData.resolution;
-
-                console.log('Bounds check:', 'mapPixel:', mapPixelX, mapPixelY, 'origin:', originX, originY, 'size:', mapData.width, mapData.height);
-                console.log('X in bounds:', mapPixelX >= originX && mapPixelX <= originX + mapData.width);
-                console.log('Y in bounds:', mapPixelY >= originY && mapPixelY <= originY + mapData.height);
 
                 if (mapPixelX >= originX && mapPixelX <= originX + mapData.width &&
                     mapPixelY >= originY && mapPixelY <= originY + mapData.height) {
-                    goalStartPos = {
-                        x: e.clientX,
-                        y: e.clientY,
-                        mapX: mapPixelX * mapData.resolution,
-                        mapY: mapPixelY * mapData.resolution
-                    };
-                    console.log('Start position set:', goalStartPos);
-                } else {
-                    console.log('Click outside map bounds');
                 }
             }
         };
@@ -467,19 +490,17 @@
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     if (goalMode) {
                         const goalMsg = { type: 'set_goal', x: targetX, y: targetY, theta: theta };
-                        console.log('Sending goal:', goalMsg);
                         ws.send(JSON.stringify(goalMsg));
                         document.getElementById('goalX').textContent = targetX.toFixed(2) + ' m';
                         document.getElementById('goalY').textContent = targetY.toFixed(2) + ' m';
                         document.getElementById('navState').textContent = 'Goal Set';
                     } else if (poseMode) {
                         const poseMsg = { type: 'set_initial_pose', x: targetX, y: targetY, theta: theta };
-                        console.log('Sending initial pose:', poseMsg);
                         ws.send(JSON.stringify(poseMsg));
-                        document.getElementById('navState').textContent = 'Initial Pose Set';
+                        showToast('Initial pose set successfully', 'success');
                     }
                 } else {
-                    console.error('WebSocket not open!');
+                    showToast('WebSocket not connected', 'error');
                 }
 
                 goalStartPos = null;
@@ -529,18 +550,18 @@
         document.getElementById('showLidar').onchange = (e) => { showLidar = e.target.checked; drawMap(); };
 
         function fetchMaps() {
-            console.log('Fetching maps...');
+            showLoading();
             fetch('/api/list_maps')
                 .then(response => response.json())
                 .then(maps => {
-                    console.log('Maps fetched:', maps);
+                    hideLoading();
                     const select = document.getElementById('mapSelect');
                     select.innerHTML = '';
                     if (maps.length === 0) {
                         const option = document.createElement('option');
                         option.text = "No maps found";
                         select.add(option);
-                        console.log('No maps found.');
+                        showToast('No maps available', 'error');
                         return;
                     }
 
@@ -560,7 +581,10 @@
                     }
                     loadMap();
                 })
-                .catch(error => console.error('Error fetching maps:', error));
+                .catch(error => {
+                    hideLoading();
+                    showToast('Error fetching maps', 'error');
+                });
         }
 
         // Check navigation status on page load
@@ -597,6 +621,7 @@
                 }
 
                 try {
+                    showLoading();
                     const response = await fetch('/api/start_navigation', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -604,39 +629,42 @@
                     });
 
                     const result = await response.text();
-                    console.log('Navigation start result:', result);
+                    hideLoading();
 
                     if (result === 'started' || result === 'already_running') {
                         btn.textContent = 'Stop Navigation';
                         btn.style.background = '#ef4444';
+                        showToast('Navigation started', 'success');
                     }
                 } catch (error) {
-                    console.error('Error starting navigation:', error);
-                    alert('Failed to start navigation');
+                    hideLoading();
+                    showToast('Failed to start navigation', 'error');
                 }
             } else {
                 // Stop navigation
+                btn.textContent = 'Stopping...';
+                btn.disabled = true;
                 try {
                     const response = await fetch('/api/stop_navigation', { method: 'POST' });
                     const result = await response.text();
-                    console.log('Navigation stop result:', result);
 
                     btn.textContent = 'Start Navigation';
                     btn.style.background = 'var(--primary-color)';
+                    btn.disabled = false;
+                    showToast('Navigation stopped', 'info');
                 } catch (error) {
-                    console.error('Error stopping navigation:', error);
-                    alert('Failed to stop navigation');
+                    btn.textContent = 'Stop Navigation';
+                    btn.disabled = false;
+                    showToast('Failed to stop navigation', 'error');
                 }
             }
         }
 
         function loadMap() {
-            // Just save the selected map, don't auto-start navigation
             const mapName = document.getElementById('mapSelect').value;
             if (!mapName) return;
 
             localStorage.setItem('lastMap', mapName);
-            console.log('Map selected:', mapName);
         }
 
         // Initial setup
