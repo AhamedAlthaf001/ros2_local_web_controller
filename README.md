@@ -375,8 +375,6 @@ This project is licensed under the **Apache License 2.0** - see the [LICENSE](LI
 
 Copyright 2025 Ahamed Althaf
 
-[Specify your license here]
-
 ## 🙏 Acknowledgments
 
 - Built with [Crow](https://github.com/CrowCpp/Crow) web framework
