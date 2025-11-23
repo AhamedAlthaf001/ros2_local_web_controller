@@ -4,7 +4,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ROS 2 Mapping</title>
+    <title>ROS 2 Web Controller - Mapping</title>
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -32,7 +34,7 @@
                         <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z" />
                     </svg>
                 </div>
-                <span class="logo-text">ROS 2 Mapping</span>
+                <span class="logo-text">ROS 2 Web Controller</span>
             </div>
             <div class="nav-tabs">
                 <a href="/mapping.html" class="nav-tab active">Mapping</a>
@@ -42,6 +44,9 @@
                 <span class="status-dot disconnected" id="statusDot"></span>
                 <span id="statusText">Connecting...</span>
             </div>
+            <button id="emergencyStopBtn" onclick="emergencyStop()"
+                style="background: #dc2626; color: white; font-weight: 700; padding: 10px 20px; margin-left: auto; margin-right: 15px; border: 2px solid #991b1b; box-shadow: 0 4px 6px rgba(220, 38, 38, 0.3); border-radius: 8px; cursor: pointer;"
+                title="Emergency Stop (Spacebar)">⚠️ E-STOP</button>
             <div class="theme-toggle" onclick="toggleTheme()" title="Toggle Theme">
                 <span class="theme-icon" id="themeIcon">☀️</span>
             </div>
@@ -105,6 +110,24 @@
                 <span class="info-label">Map Size</span>
                 <span class="info-value" id="mapSize">---</span>
             </div>
+            <div
+                style="margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border-color); text-align: center;">
+                <small style="color: var(--text-secondary); font-size: 11px;">v1.0.0</small>
+            </div>
+        </div>
+
+        <!-- Toast Container -->
+        <div id="toast-container" style="position: fixed; top: 20px; right: 20px; z-index: 10000;"></div>
+
+        <!-- Loading Overlay -->
+        <div id="loading-overlay"
+            style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 9999; align-items: center; justify-content: center;">
+            <div style="background: var(--bg-secondary); padding: 30px; border-radius: 12px; text-align: center;">
+                <div class="spinner"
+                    style="width: 50px; height: 50px; border: 4px solid var(--border-color); border-top-color: var(--primary-color); border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 15px;">
+                </div>
+                <p style="color: var(--text-primary); margin: 0;">Processing...</p>
+            </div>
         </div>
 
         <!-- Joystick -->
@@ -167,6 +190,61 @@
             document.getElementById('themeIcon').textContent = '🌙';
         }
 
+        // Toast notification system
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = message;
+            container.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
+        // Loading overlay
+        function showLoading() {
+            document.getElementById('loading-overlay').style.display = 'flex';
+        }
+        function hideLoading() {
+            document.getElementById('loading-overlay').style.display = 'none';
+        }
+
+        // Emergency stop function
+        function emergencyStop() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'cmd_vel', linear: 0, angular: 0 }));
+                ws.send(JSON.stringify({ type: 'emergency_stop' }));
+                showToast('Emergency stop activated!', 'error');
+            } else {
+                showToast('Not connected to robot', 'error');
+            }
+        }
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+            switch (e.key.toLowerCase()) {
+                case ' ':  // Spacebar - Emergency stop
+                    e.preventDefault();
+                    emergencyStop();
+                    break;
+                case '+':
+                case '=':
+                    e.preventDefault();
+                    zoomIn();
+                    break;
+                case '-':
+                case '_':
+                    e.preventDefault();
+                    zoomOut();
+                    break;
+                case 'r':
+                    e.preventDefault();
+                    resetView();
+                    break;
+            }
+        });
+
         // LiDAR toggle
         document.getElementById('showLidar').onchange = (e) => {
             showLidar = e.target.checked;
@@ -212,7 +290,7 @@
                     const msg = JSON.parse(event.data);
 
                     if (msg.type === 'error') {
-                        alert(msg.message);
+                        showToast(msg.message, 'error');
                         ws.close();
                         return;
                     }
@@ -229,7 +307,6 @@
 
                         // Reset view if it's the first load OR if it's a new map
                         if (isFirstLoad || isNewMap) {
-                            console.log('New map detected:', msg.width, 'x', msg.height);
                             fitToCanvas();
                             isFirstLoad = false;
                         }
@@ -244,9 +321,7 @@
                         scanPoints = msg.points;
                         drawMap();
                     }
-                } catch (e) {
-                    console.log('Non-JSON message:', event.data);
-                }
+                } catch (e) { /* Ignore non-JSON messages */ }
             };
         }
 
@@ -530,30 +605,39 @@
             if (btn.textContent === 'Start Mapping') {
                 // Start mapping
                 try {
+                    showLoading();
                     const response = await fetch('/api/start_mapping', { method: 'POST' });
                     const result = await response.text();
-                    console.log('Mapping start result:', result);
+                    hideLoading();
 
                     if (result === 'started' || result === 'already_running') {
                         btn.textContent = 'Stop Mapping';
                         btn.style.background = '#ef4444';
+                        showToast('Mapping started', 'success');
                     }
                 } catch (error) {
-                    console.error('Error starting mapping:', error);
-                    alert('Failed to start mapping');
+                    hideLoading();
+                    showToast('Failed to start mapping', 'error');
                 }
             } else {
-                // Stop mapping
+                // Stop mapping with confirmation
+                if (!confirm('Stop mapping? Current map progress will be lost if not saved.')) {
+                    return;
+                }
+                btn.textContent = 'Stopping...';
+                btn.disabled = true;
                 try {
                     const response = await fetch('/api/stop_mapping', { method: 'POST' });
                     const result = await response.text();
-                    console.log('Mapping stop result:', result);
 
                     btn.textContent = 'Start Mapping';
                     btn.style.background = 'var(--primary-color)';
+                    btn.disabled = false;
+                    showToast('Mapping stopped', 'info');
                 } catch (error) {
-                    console.error('Error stopping mapping:', error);
-                    alert('Failed to stop mapping');
+                    btn.textContent = 'Stop Mapping';
+                    btn.disabled = false;
+                    showToast('Failed to stop mapping', 'error');
                 }
             }
         }
@@ -561,19 +645,24 @@
         function saveMap() {
             const mapName = document.getElementById('mapNameInput').value;
             if (!mapName) {
-                alert('Please enter a map name');
+                showToast('Please enter a map name', 'error');
                 return;
             }
+            showLoading();
             fetch('/api/save_map', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ map_name: mapName })
             })
                 .then(response => {
-                    if (response.ok) alert('Map saved successfully!');
-                    else alert('Failed to save map.');
+                    hideLoading();
+                    if (response.ok) showToast('Map saved successfully!', 'success');
+                    else showToast('Failed to save map', 'error');
                 })
-                .catch(error => console.error('Error saving map:', error));
+                .catch(error => {
+                    hideLoading();
+                    showToast('Error saving map', 'error');
+                });
         }
 
         function resetMapping() {
@@ -581,13 +670,13 @@
                 fetch('/api/reset_mapping', { method: 'POST' })
                     .then(response => response.text())
                     .then(data => {
-                        console.log('Mapping reset:', data);
                         // Clear local map data
                         mapData = null;
                         scanPoints = [];
                         ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        showToast('Mapping reset successfully', 'success');
                     })
-                    .catch(error => console.error('Error resetting mapping:', error));
+                    .catch(error => showToast('Error resetting mapping', 'error'));
             }
         }
 

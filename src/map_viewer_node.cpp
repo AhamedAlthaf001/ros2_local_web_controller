@@ -3,9 +3,11 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
+#include "nav2_msgs/action/navigate_to_pose.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp_action/rclcpp_action.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2_ros/buffer.h"
@@ -216,12 +218,17 @@ public:
         plan_topic_, 10,
         std::bind(&MapViewerNode::plan_callback, this, std::placeholders::_1));
 
+    // Create publishers
     goal_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
         goal_topic_, 10);
-
     initial_pose_pub_ =
         this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
             initial_pose_topic_, 10);
+
+    // Create action client for canceling navigation goals
+    nav_action_client_ =
+        rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
+            this, "navigate_to_pose");
 
     // Subscribe to Nav2 action status
     goal_status_sub_ =
@@ -853,79 +860,165 @@ private:
             }
 
             if (x.has("type") && x["type"].s() == "cmd_vel") {
+              // Validate required fields and types
+              if (!x.has("linear") || !x.has("angular")) {
+                RCLCPP_WARN(this->get_logger(),
+                            "cmd_vel missing required fields");
+                return;
+              }
+
+              if (x["linear"].t() != crow::json::type::Number ||
+                  x["angular"].t() != crow::json::type::Number) {
+                RCLCPP_WARN(this->get_logger(),
+                            "cmd_vel fields must be numbers");
+                return;
+              }
+
+              double linear = x["linear"].d();
+              double angular = x["angular"].d();
+
+              // Validate ranges
+              if (std::isnan(linear) || std::isinf(linear) ||
+                  std::isnan(angular) || std::isinf(angular)) {
+                RCLCPP_WARN(this->get_logger(),
+                            "cmd_vel contains invalid numeric values");
+                return;
+              }
+
               auto msg = geometry_msgs::msg::TwistStamped();
               msg.header.stamp = this->now();
               msg.header.frame_id = base_link_frame_;
 
-              // Robust parsing for linear and angular
-              if (x.has("linear")) {
-                if (x["linear"].t() == crow::json::type::Number)
-                  msg.twist.linear.x =
-                      std::max(std::min(max_linear_velocity_, x["linear"].d()),
-                               -max_linear_velocity_);
-              }
-
-              if (x.has("angular")) {
-                if (x["angular"].t() == crow::json::type::Number)
-                  msg.twist.angular.z = std::max(
-                      std::min(max_angular_velocity_, x["angular"].d()),
-                      -max_angular_velocity_);
-              }
+              // Clamp to safe limits
+              msg.twist.linear.x =
+                  std::max(std::min(max_linear_velocity_, linear),
+                           -max_linear_velocity_);
+              msg.twist.angular.z =
+                  std::max(std::min(max_angular_velocity_, angular),
+                           -max_angular_velocity_);
 
               cmd_vel_pub_->publish(msg);
             } else if (x.has("type") && x["type"].s() == "set_goal") {
+              // Validate required fields
+              if (!x.has("x") || !x.has("y") || !x.has("theta")) {
+                RCLCPP_WARN(this->get_logger(),
+                            "set_goal missing required fields (x, y, theta)");
+                return;
+              }
+
+              if (x["x"].t() != crow::json::type::Number ||
+                  x["y"].t() != crow::json::type::Number ||
+                  x["theta"].t() != crow::json::type::Number) {
+                RCLCPP_WARN(this->get_logger(),
+                            "set_goal fields must be numbers");
+                return;
+              }
+
+              double goal_x = x["x"].d();
+              double goal_y = x["y"].d();
+              double theta = x["theta"].d();
+
+              // Validate numeric values
+              if (std::isnan(goal_x) || std::isinf(goal_x) ||
+                  std::isnan(goal_y) || std::isinf(goal_y) ||
+                  std::isnan(theta) || std::isinf(theta)) {
+                RCLCPP_WARN(this->get_logger(),
+                            "set_goal contains invalid numeric values");
+                return;
+              }
+
               RCLCPP_INFO(this->get_logger(),
                           "Received set_goal message from WebSocket");
-              // Publish navigation goal
+
               auto goal_msg = geometry_msgs::msg::PoseStamped();
               goal_msg.header.stamp = this->now();
               goal_msg.header.frame_id = map_frame_;
-
-              if (x.has("x") && x["x"].t() == crow::json::type::Number)
-                goal_msg.pose.position.x = x["x"].d();
-              if (x.has("y") && x["y"].t() == crow::json::type::Number)
-                goal_msg.pose.position.y = x["y"].d();
-
-              // Set orientation from theta
-              double theta = 0.0;
-              if (x.has("theta") && x["theta"].t() == crow::json::type::Number)
-                theta = x["theta"].d();
-
+              goal_msg.pose.position.x = goal_x;
+              goal_msg.pose.position.y = goal_y;
               goal_msg.pose.orientation.z = std::sin(theta / 2.0);
               goal_msg.pose.orientation.w = std::cos(theta / 2.0);
 
               goal_pub_->publish(goal_msg);
               RCLCPP_INFO(this->get_logger(),
-                          "Published goal: x=%.2f, y=%.2f, theta=%.2f",
-                          goal_msg.pose.position.x, goal_msg.pose.position.y,
-                          theta);
+                          "Published goal: x=%.2f, y=%.2f, theta=%.2f", goal_x,
+                          goal_y, theta);
             } else if (x.has("type") && x["type"].s() == "set_initial_pose") {
+              // Validate required fields
+              if (!x.has("x") || !x.has("y") || !x.has("theta")) {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "set_initial_pose missing required fields (x, y, theta)");
+                return;
+              }
+
+              if (x["x"].t() != crow::json::type::Number ||
+                  x["y"].t() != crow::json::type::Number ||
+                  x["theta"].t() != crow::json::type::Number) {
+                RCLCPP_WARN(this->get_logger(),
+                            "set_initial_pose fields must be numbers");
+                return;
+              }
+
+              double pose_x = x["x"].d();
+              double pose_y = x["y"].d();
+              double theta = x["theta"].d();
+
+              // Validate numeric values
+              if (std::isnan(pose_x) || std::isinf(pose_x) ||
+                  std::isnan(pose_y) || std::isinf(pose_y) ||
+                  std::isnan(theta) || std::isinf(theta)) {
+                RCLCPP_WARN(this->get_logger(),
+                            "set_initial_pose contains invalid numeric values");
+                return;
+              }
+
               RCLCPP_INFO(this->get_logger(),
                           "Received set_initial_pose message from WebSocket");
-              // Publish initial pose
+
               auto initial_pose_msg =
                   geometry_msgs::msg::PoseWithCovarianceStamped();
               initial_pose_msg.header.stamp = this->now();
               initial_pose_msg.header.frame_id = map_frame_;
-
-              if (x.has("x") && x["x"].t() == crow::json::type::Number)
-                initial_pose_msg.pose.pose.position.x = x["x"].d();
-              if (x.has("y") && x["y"].t() == crow::json::type::Number)
-                initial_pose_msg.pose.pose.position.y = x["y"].d();
-
-              // Set orientation from theta
-              double theta = 0.0;
-              if (x.has("theta") && x["theta"].t() == crow::json::type::Number)
-                theta = x["theta"].d();
-
+              initial_pose_msg.pose.pose.position.x = pose_x;
+              initial_pose_msg.pose.pose.position.y = pose_y;
               initial_pose_msg.pose.pose.orientation.z = std::sin(theta / 2.0);
               initial_pose_msg.pose.pose.orientation.w = std::cos(theta / 2.0);
 
               initial_pose_pub_->publish(initial_pose_msg);
               RCLCPP_INFO(this->get_logger(),
                           "Published initial pose: x=%.2f, y=%.2f, theta=%.2f",
-                          initial_pose_msg.pose.pose.position.x,
-                          initial_pose_msg.pose.pose.position.y, theta);
+                          pose_x, pose_y, theta);
+            } else if (x.has("type") && x["type"].s() == "emergency_stop") {
+              RCLCPP_WARN(this->get_logger(), "EMERGENCY STOP ACTIVATED!");
+
+              // Publish zero velocity
+              auto stop_msg = geometry_msgs::msg::TwistStamped();
+              stop_msg.header.stamp = this->now();
+              stop_msg.header.frame_id = base_link_frame_;
+              stop_msg.twist.linear.x = 0.0;
+              stop_msg.twist.linear.y = 0.0;
+              stop_msg.twist.linear.z = 0.0;
+              stop_msg.twist.angular.x = 0.0;
+              stop_msg.twist.angular.y = 0.0;
+              stop_msg.twist.angular.z = 0.0;
+
+              // Publish multiple times to ensure it's received
+              for (int i = 0; i < 10; i++) {
+                cmd_vel_pub_->publish(stop_msg);
+                // Small delay to ensure messages are sent
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+              }
+
+              // Cancel all navigation goals using action client
+              if (nav_action_client_) {
+                auto cancel_future =
+                    nav_action_client_->async_cancel_all_goals();
+                RCLCPP_WARN(this->get_logger(),
+                            "Emergency stop - canceling all navigation goals");
+              } else {
+                RCLCPP_WARN(this->get_logger(),
+                            "Emergency stop - action client not ready");
+              }
             }
           } catch (const std::exception &e) {
             RCLCPP_ERROR(this->get_logger(), "Error parsing JSON: %s",
@@ -1166,6 +1259,8 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
       initial_pose_pub_;
+  rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr
+      nav_action_client_;
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
