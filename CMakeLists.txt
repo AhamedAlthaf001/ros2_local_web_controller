@@ -14,19 +14,17 @@ find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(action_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)   
 
-add_executable(web_server_node src/web_server_node.cpp)
-target_include_directories(web_server_node PUBLIC include)
-target_link_libraries(web_server_node pthread)
-ament_target_dependencies(web_server_node rclcpp std_msgs ament_index_cpp)
+
 
 add_executable(map_viewer_node src/map_viewer_node.cpp)
 target_include_directories(map_viewer_node PUBLIC include)
 target_link_libraries(map_viewer_node pthread)
-ament_target_dependencies(map_viewer_node rclcpp nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs ament_index_cpp)
+ament_target_dependencies(map_viewer_node rclcpp nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs action_msgs ament_index_cpp)
 
-install(TARGETS web_server_node map_viewer_node
+install(TARGETS  map_viewer_node
   DESTINATION lib/${PROJECT_NAME})
 
 # Install config, launch, and web directories

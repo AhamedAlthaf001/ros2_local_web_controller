@@ -51,6 +51,10 @@
                 <option value="" disabled selected>Loading maps...</option>
             </select>
         </div>
+        <button id="navControlBtn" onclick="toggleNavigation()"
+            style="margin-bottom: 12px; width: 100%; background: var(--primary-color);">
+            Start Navigation
+        </button>
         <button id="setGoalBtn" onclick="toggleGoalMode()" style="margin-bottom: 12px; width: 100%;">Set Goal</button>
         <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">Drag map to pan, click Set Goal
             to place navigation target</p>
@@ -130,15 +134,22 @@
         }
 
         function connect() {
-            ws = new WebSocket('ws://' + window.location.hostname + ':8082/ws');
+            const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+            const port = window.location.port ? window.location.port : (window.location.protocol === 'https:' ? 443 : 80);
+            ws = new WebSocket(protocol + window.location.hostname + ':' + port + '/ws');
             ws.onopen = () => {
                 statusDot.classList.remove('disconnected');
                 statusText.textContent = 'Connected';
 
                 // Authenticate
                 const token = getCookie('session_token');
+                console.log('WebSocket Open. Token found:', token ? 'YES' : 'NO', token);
                 if (token) {
-                    ws.send(JSON.stringify({ type: 'auth', token: token }));
+                    const authMsg = { type: 'auth', token: token };
+                    console.log('Sending auth message:', authMsg);
+                    ws.send(JSON.stringify(authMsg));
+                } else {
+                    console.warn('No session token found! WebSocket will not be authenticated.');
                 }
             };
             ws.onclose = (event) => {
@@ -151,6 +162,13 @@
             ws.onmessage = (event) => {
                 try {
                     const msg = JSON.parse(event.data);
+
+                    if (msg.type === 'error') {
+                        alert(msg.message);
+                        ws.close();
+                        return;
+                    }
+
                     if (msg.type === 'map') {
                         // Check if this is a different map (different dimensions)
                         const isNewMap = !mapData ||
@@ -385,6 +403,10 @@
                 const originX = mapData.origin.position.x / mapData.resolution;
                 const originY = mapData.origin.position.y / mapData.resolution;
 
+                console.log('Bounds check:', 'mapPixel:', mapPixelX, mapPixelY, 'origin:', originX, originY, 'size:', mapData.width, mapData.height);
+                console.log('X in bounds:', mapPixelX >= originX && mapPixelX <= originX + mapData.width);
+                console.log('Y in bounds:', mapPixelY >= originY && mapPixelY <= originY + mapData.height);
+
                 if (mapPixelX >= originX && mapPixelX <= originX + mapData.width &&
                     mapPixelY >= originY && mapPixelY <= originY + mapData.height) {
                     goalStartPos = {
@@ -393,6 +415,9 @@
                         mapX: mapPixelX * mapData.resolution,
                         mapY: mapPixelY * mapData.resolution
                     };
+                    console.log('Goal start position set:', goalStartPos);
+                } else {
+                    console.log('Click outside map bounds - goal not set');
                 }
             }
         };
@@ -433,8 +458,13 @@
                 document.getElementById('goalY').textContent = currentGoal.y.toFixed(2) + ' m';
                 document.getElementById('navState').textContent = 'Goal Set';
 
+                console.log('WebSocket state:', ws.readyState, 'OPEN=', WebSocket.OPEN);
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'set_goal', x: currentGoal.x, y: currentGoal.y, theta: theta }));
+                    const goalMsg = { type: 'set_goal', x: currentGoal.x, y: currentGoal.y, theta: theta };
+                    console.log('Sending goal to server:', goalMsg);
+                    ws.send(JSON.stringify(goalMsg));
+                } else {
+                    console.error('WebSocket not open! State:', ws ? ws.readyState : 'null');
                 }
 
                 goalStartPos = null;
@@ -491,25 +521,85 @@
                 .catch(error => console.error('Error fetching maps:', error));
         }
 
+        // Check navigation status on page load
+        async function checkNavigationStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const status = await response.json();
+
+                const btn = document.getElementById('navControlBtn');
+                if (status.navigation) {
+                    // Navigation is running
+                    btn.textContent = 'Stop Navigation';
+                    btn.style.background = '#ef4444'; // Red color for stop
+                } else {
+                    // Navigation is stopped
+                    btn.textContent = 'Start Navigation';
+                    btn.style.background = 'var(--primary-color)';
+                }
+            } catch (error) {
+                console.error('Error checking navigation status:', error);
+            }
+        }
+
+        // Toggle navigation on/off
+        async function toggleNavigation() {
+            const btn = document.getElementById('navControlBtn');
+            const mapName = document.getElementById('mapSelect').value;
+
+            if (btn.textContent === 'Start Navigation') {
+                // Start navigation
+                if (!mapName) {
+                    alert('Please select a map first');
+                    return;
+                }
+
+                try {
+                    const response = await fetch('/api/start_navigation', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ map_name: mapName })
+                    });
+
+                    const result = await response.text();
+                    console.log('Navigation start result:', result);
+
+                    if (result === 'started' || result === 'already_running') {
+                        btn.textContent = 'Stop Navigation';
+                        btn.style.background = '#ef4444';
+                    }
+                } catch (error) {
+                    console.error('Error starting navigation:', error);
+                    alert('Failed to start navigation');
+                }
+            } else {
+                // Stop navigation
+                try {
+                    const response = await fetch('/api/stop_navigation', { method: 'POST' });
+                    const result = await response.text();
+                    console.log('Navigation stop result:', result);
+
+                    btn.textContent = 'Start Navigation';
+                    btn.style.background = 'var(--primary-color)';
+                } catch (error) {
+                    console.error('Error stopping navigation:', error);
+                    alert('Failed to stop navigation');
+                }
+            }
+        }
+
         function loadMap() {
+            // Just save the selected map, don't auto-start navigation
             const mapName = document.getElementById('mapSelect').value;
             if (!mapName) return;
 
             localStorage.setItem('lastMap', mapName);
-            console.log('Loading map:', mapName);
-
-            fetch('/api/start_navigation', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ map_name: mapName })
-            })
-                .then(response => response.text())
-                .then(data => console.log('Navigation started:', data))
-                .catch(error => console.error('Error starting navigation:', error));
+            console.log('Map selected:', mapName);
         }
 
-        // Initial fetch
+        // Initial setup
         fetchMaps();
+        checkNavigationStatus(); // Check if navigation is already running
         connect();
     </script>
 </body>

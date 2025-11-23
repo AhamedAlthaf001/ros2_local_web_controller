@@ -13,11 +13,13 @@ map_viewer_node:
     base_link_frame: "base_link"
     
     # Server configuration
-    ros_websocket_port: 9090
+    port: 8082
     
     # Launch Commands
     mapping_launch_cmd: "ros2 launch turtlebot3_cartographer cartographer.launch.py use_sim_time:=True"
     navigation_launch_cmd: "ros2 launch turtlebot3_navigation2 navigation2.launch.py use_sim_time:=True"
+    default_map: "test_map1"
+    auto_start_nav: false
     
     # .env file path (relative to package share or absolute)
     env_file_path: ""  # Leave empty to use package_dir/.env

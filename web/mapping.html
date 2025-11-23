@@ -54,6 +54,10 @@
         <div id="controls">
             <div class="control-section">
                 <div class="control-label">Mapping Controls</div>
+                <button id="mappingControlBtn" onclick="toggleMapping()"
+                    style="width: 100%; margin-bottom: 10px; background: var(--primary-color);">
+                    Start Mapping
+                </button>
                 <div class="input-group" style="margin-bottom: 10px;">
                     <input type="text" id="mapNameInput" placeholder="Map Name" class="input-field"
                         style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-tertiary); color: var(--text-primary);">
@@ -176,7 +180,9 @@
         }
 
         function connect() {
-            ws = new WebSocket('ws://' + window.location.hostname + ':8082/ws');
+            const protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+            const port = window.location.port ? window.location.port : (window.location.protocol === 'https:' ? 443 : 80);
+            ws = new WebSocket(protocol + window.location.hostname + ':' + port + '/ws');
 
             ws.onopen = () => {
                 statusDot.classList.remove('disconnected');
@@ -204,6 +210,13 @@
             ws.onmessage = (event) => {
                 try {
                     const msg = JSON.parse(event.data);
+
+                    if (msg.type === 'error') {
+                        alert(msg.message);
+                        ws.close();
+                        return;
+                    }
+
                     if (msg.type === 'map') {
                         // Check if this is a different map (different dimensions)
                         const isNewMap = !mapData ||
@@ -489,11 +502,60 @@
             }
         }
 
-        function startMapping() {
-            fetch('/api/start_mapping', { method: 'POST' })
-                .then(response => response.text())
-                .then(data => console.log('Mapping started:', data))
-                .catch(error => console.error('Error starting mapping:', error));
+        // Check mapping status on page load
+        async function checkMappingStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const status = await response.json();
+
+                const btn = document.getElementById('mappingControlBtn');
+                if (status.mapping) {
+                    // Mapping is running
+                    btn.textContent = 'Stop Mapping';
+                    btn.style.background = '#ef4444'; // Red color for stop
+                } else {
+                    // Mapping is stopped
+                    btn.textContent = 'Start Mapping';
+                    btn.style.background = 'var(--primary-color)';
+                }
+            } catch (error) {
+                console.error('Error checking mapping status:', error);
+            }
+        }
+
+        // Toggle mapping on/off
+        async function toggleMapping() {
+            const btn = document.getElementById('mappingControlBtn');
+
+            if (btn.textContent === 'Start Mapping') {
+                // Start mapping
+                try {
+                    const response = await fetch('/api/start_mapping', { method: 'POST' });
+                    const result = await response.text();
+                    console.log('Mapping start result:', result);
+
+                    if (result === 'started' || result === 'already_running') {
+                        btn.textContent = 'Stop Mapping';
+                        btn.style.background = '#ef4444';
+                    }
+                } catch (error) {
+                    console.error('Error starting mapping:', error);
+                    alert('Failed to start mapping');
+                }
+            } else {
+                // Stop mapping
+                try {
+                    const response = await fetch('/api/stop_mapping', { method: 'POST' });
+                    const result = await response.text();
+                    console.log('Mapping stop result:', result);
+
+                    btn.textContent = 'Start Mapping';
+                    btn.style.background = 'var(--primary-color)';
+                } catch (error) {
+                    console.error('Error stopping mapping:', error);
+                    alert('Failed to stop mapping');
+                }
+            }
         }
 
         function saveMap() {
@@ -529,10 +591,9 @@
             }
         }
 
-        // Start mapping on load
-        startMapping();
-
-
+        // Initial setup
+        checkMappingStatus(); // Check if mapping is already running
+        connect();
     </script>
 </body>
 

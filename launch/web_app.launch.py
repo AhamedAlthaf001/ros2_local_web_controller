@@ -27,16 +27,8 @@ def generate_launch_description():
         output='screen'
     )
     
-    # Web server node
-    # web_server_node = Node(
-    #     package='web_test',
-    #     executable='web_server_node',
-    #     name='web_server_node',
-    #     output='screen'
-    # )
     
     return LaunchDescription([
         params_file_arg,
-        map_viewer_node,
-        # web_server_node
+        map_viewer_node
     ])
