@@ -8,6 +8,7 @@
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
+#include "sensor_msgs/msg/battery_state.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2_ros/buffer.h"
@@ -100,13 +101,16 @@ public:
     // Initialize states
     nav_state_ = ProcessState::STOPPED;
     mapping_state_ = ProcessState::STOPPED;
+    emergency_stop_active_ = false;
     // Declare parameters
     this->declare_parameter("map_topic", "/map");
     this->declare_parameter("cmd_vel_topic", "/cmd_vel");
     this->declare_parameter("scan_topic", "/scan");
+    this->declare_parameter("battery_state_topic", "/battery_state");
     this->declare_parameter("plan_topic", "/plan");
     this->declare_parameter("goal_topic", "/goal_pose");
     this->declare_parameter("initial_pose_topic", "/initialpose");
+    this->declare_parameter("nav_action_client_topic", "/navigate_to_pose");
     this->declare_parameter("map_frame", "map");
     this->declare_parameter("base_link_frame", "base_link");
     this->declare_parameter("tf_prefix", "");
@@ -128,9 +132,13 @@ public:
     map_topic_ = this->get_parameter("map_topic").as_string();
     cmd_vel_topic_ = this->get_parameter("cmd_vel_topic").as_string();
     scan_topic_ = this->get_parameter("scan_topic").as_string();
+    battery_state_topic_ =
+        this->get_parameter("battery_state_topic").as_string();
     plan_topic_ = this->get_parameter("plan_topic").as_string();
     goal_topic_ = this->get_parameter("goal_topic").as_string();
     initial_pose_topic_ = this->get_parameter("initial_pose_topic").as_string();
+    nav_action_client_topic_ =
+        this->get_parameter("nav_action_client_topic").as_string();
     map_frame_ = this->get_parameter("map_frame").as_string();
     tf_prefix_ = this->get_parameter("tf_prefix").as_string();
     base_link_frame_ = this->get_parameter("base_link_frame").as_string();
@@ -159,10 +167,14 @@ public:
     RCLCPP_INFO(this->get_logger(), "  Cmd_vel topic: %s",
                 cmd_vel_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "  Scan topic: %s", scan_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "  Battery state topic: %s",
+                battery_state_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "  Plan topic: %s", plan_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "  Goal topic: %s", goal_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "  Initial pose topic: %s",
                 initial_pose_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "  Nav action client topic: %s",
+                nav_action_client_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "  Frames: %s -> %s", map_frame_.c_str(),
                 base_link_frame_.c_str());
     RCLCPP_INFO(this->get_logger(), "  TF prefix: %s", tf_prefix_.c_str());
@@ -214,6 +226,11 @@ public:
         scan_topic_, 10,
         std::bind(&MapViewerNode::scan_callback, this, std::placeholders::_1));
 
+    battery_sub_ = this->create_subscription<sensor_msgs::msg::BatteryState>(
+        battery_state_topic_, 10,
+        std::bind(&MapViewerNode::battery_callback, this,
+                  std::placeholders::_1));
+
     plan_sub_ = this->create_subscription<nav_msgs::msg::Path>(
         plan_topic_, 10,
         std::bind(&MapViewerNode::plan_callback, this, std::placeholders::_1));
@@ -228,12 +245,12 @@ public:
     // Create action client for canceling navigation goals
     nav_action_client_ =
         rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
-            this, "navigate_to_pose");
+            this, nav_action_client_topic_);
 
     // Subscribe to Nav2 action status
     goal_status_sub_ =
         this->create_subscription<action_msgs::msg::GoalStatusArray>(
-            "/navigate_to_pose/_action/status",
+            nav_action_client_topic_ + "/_action/status",
             rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable(),
             std::bind(&MapViewerNode::goal_status_callback, this,
                       std::placeholders::_1));
@@ -835,6 +852,19 @@ private:
                 if (!last_map_json_.empty()) {
                   conn.send_text(last_map_json_);
                 }
+
+                // Send max velocity parameters
+                crow::json::wvalue config_msg;
+                config_msg["type"] = "config";
+                config_msg["max_linear_velocity"] = max_linear_velocity_;
+                config_msg["max_angular_velocity"] = max_angular_velocity_;
+                conn.send_text(config_msg.dump());
+
+                // Send current E-STOP state
+                crow::json::wvalue estop_msg;
+                estop_msg["type"] = "estop_state";
+                estop_msg["active"] = emergency_stop_active_.load();
+                conn.send_text(estop_msg.dump());
               } else {
                 RCLCPP_WARN(this->get_logger(),
                             "Invalid auth token. Closing connection.");
@@ -860,6 +890,12 @@ private:
             }
 
             if (x.has("type") && x["type"].s() == "cmd_vel") {
+              // Check if emergency stop is active
+              if (emergency_stop_active_) {
+                // Silently ignore cmd_vel when E-STOP is active
+                return;
+              }
+
               // Validate required fields and types
               if (!x.has("linear") || !x.has("angular")) {
                 RCLCPP_WARN(this->get_logger(),
@@ -899,6 +935,18 @@ private:
 
               cmd_vel_pub_->publish(msg);
             } else if (x.has("type") && x["type"].s() == "set_goal") {
+              // Check if emergency stop is active
+              if (emergency_stop_active_) {
+                RCLCPP_WARN(this->get_logger(),
+                            "Goal rejected - emergency stop is active");
+                // Send rejection message to client
+                crow::json::wvalue reject_msg;
+                reject_msg["type"] = "goal_rejected";
+                reject_msg["reason"] = "Emergency stop is active";
+                conn.send_text(reject_msg.dump());
+                return;
+              }
+
               // Validate required fields
               if (!x.has("x") || !x.has("y") || !x.has("theta")) {
                 RCLCPP_WARN(this->get_logger(),
@@ -983,42 +1031,56 @@ private:
               initial_pose_msg.pose.pose.position.y = pose_y;
               initial_pose_msg.pose.pose.orientation.z = std::sin(theta / 2.0);
               initial_pose_msg.pose.pose.orientation.w = std::cos(theta / 2.0);
-
               initial_pose_pub_->publish(initial_pose_msg);
               RCLCPP_INFO(this->get_logger(),
                           "Published initial pose: x=%.2f, y=%.2f, theta=%.2f",
                           pose_x, pose_y, theta);
             } else if (x.has("type") && x["type"].s() == "emergency_stop") {
-              RCLCPP_WARN(this->get_logger(), "EMERGENCY STOP ACTIVATED!");
+              // Toggle emergency stop state
+              emergency_stop_active_ = !emergency_stop_active_;
 
-              // Publish zero velocity
-              auto stop_msg = geometry_msgs::msg::TwistStamped();
-              stop_msg.header.stamp = this->now();
-              stop_msg.header.frame_id = base_link_frame_;
-              stop_msg.twist.linear.x = 0.0;
-              stop_msg.twist.linear.y = 0.0;
-              stop_msg.twist.linear.z = 0.0;
-              stop_msg.twist.angular.x = 0.0;
-              stop_msg.twist.angular.y = 0.0;
-              stop_msg.twist.angular.z = 0.0;
+              if (emergency_stop_active_) {
+                RCLCPP_WARN(this->get_logger(), "EMERGENCY STOP ACTIVATED!");
 
-              // Publish multiple times to ensure it's received
-              for (int i = 0; i < 10; i++) {
-                cmd_vel_pub_->publish(stop_msg);
-                // Small delay to ensure messages are sent
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-              }
+                // Publish zero velocity
+                auto stop_msg = geometry_msgs::msg::TwistStamped();
+                stop_msg.header.stamp = this->now();
+                stop_msg.header.frame_id = base_link_frame_;
+                stop_msg.twist.linear.x = 0.0;
+                stop_msg.twist.linear.y = 0.0;
+                stop_msg.twist.linear.z = 0.0;
+                stop_msg.twist.angular.x = 0.0;
+                stop_msg.twist.angular.y = 0.0;
+                stop_msg.twist.angular.z = 0.0;
 
-              // Cancel all navigation goals using action client
-              if (nav_action_client_) {
-                auto cancel_future =
-                    nav_action_client_->async_cancel_all_goals();
-                RCLCPP_WARN(this->get_logger(),
-                            "Emergency stop - canceling all navigation goals");
+                // Publish multiple times to ensure it's received
+                for (int i = 0; i < 10; i++) {
+                  cmd_vel_pub_->publish(stop_msg);
+                  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+
+                // Cancel all navigation goals using action client
+                if (nav_action_client_) {
+                  auto cancel_future =
+                      nav_action_client_->async_cancel_all_goals();
+                  RCLCPP_WARN(
+                      this->get_logger(),
+                      "Emergency stop - canceling all navigation goals");
+                } else {
+                  RCLCPP_WARN(this->get_logger(),
+                              "Emergency stop - action client not ready");
+                }
               } else {
-                RCLCPP_WARN(this->get_logger(),
-                            "Emergency stop - action client not ready");
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "Emergency stop DEACTIVATED - normal operation resumed");
               }
+
+              // Send E-STOP state to client
+              crow::json::wvalue estop_msg;
+              estop_msg["type"] = "estop_state";
+              estop_msg["active"] = emergency_stop_active_.load();
+              conn.send_text(estop_msg.dump());
             }
           } catch (const std::exception &e) {
             RCLCPP_ERROR(this->get_logger(), "Error parsing JSON: %s",
@@ -1147,6 +1209,25 @@ private:
     }
   }
 
+  void battery_callback(const sensor_msgs::msg::BatteryState::SharedPtr msg) {
+    crow::json::wvalue x;
+    x["type"] = "battery";
+    x["percentage"] = msg->percentage * 100.0; // Convert to percentage
+    x["voltage"] = msg->voltage;
+    x["current"] = msg->current;
+    x["charge"] = msg->charge;
+    x["capacity"] = msg->capacity;
+    x["power_supply_status"] = msg->power_supply_status;
+    x["present"] = msg->present;
+
+    std::string json_str = x.dump();
+
+    std::lock_guard<std::mutex> _(mtx_);
+    for (auto &[conn, id] : users_) {
+      conn->send_text(json_str);
+    }
+  }
+
   void plan_callback(const nav_msgs::msg::Path::SharedPtr msg) {
     crow::json::wvalue x;
     x["type"] = "plan";
@@ -1252,6 +1333,7 @@ private:
 
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::BatteryState>::SharedPtr battery_sub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr plan_sub_;
   rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr
       goal_status_sub_;
@@ -1269,9 +1351,11 @@ private:
   std::string map_topic_;
   std::string cmd_vel_topic_;
   std::string scan_topic_;
+  std::string battery_state_topic_;
   std::string plan_topic_;
   std::string goal_topic_;
   std::string initial_pose_topic_;
+  std::string nav_action_client_topic_;
   std::string map_frame_;
   std::string base_link_frame_;
   std::string tf_prefix_;
@@ -1290,6 +1374,7 @@ private:
   std::atomic<ProcessState> nav_state_;
   std::atomic<ProcessState> mapping_state_;
   std::atomic<bool> running_;
+  std::atomic<bool> emergency_stop_active_;
   // std::atomic<int> connected_users_{0}; // Removed in favor of users_.size()
   std::thread monitor_thread_;
 
