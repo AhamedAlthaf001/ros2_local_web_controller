@@ -24,8 +24,14 @@
 
 </head>
 
+<!-- Emergency Stop Banner -->
+<div id="estop-banner"
+    style="display: none; position: fixed; top: 0; left: 0; right: 0; background: #dc2626; color: white; padding: 12px; text-align: center; font-weight: 700; font-size: 16px; z-index: 10001; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+    ⚠️ EMERGENCY STOP ACTIVE - Robot is stopped and commands are disabled ⚠️
+</div>
+
 <body>
-    <div id="header">
+    <div id="header" style="margin-top: 0;">
         <div class="logo">
             <span class="logo-text">ROS 2 Web Controller</span>
         </div>
@@ -113,6 +119,14 @@
             <span class="status-label">Status</span>
             <span class="status-value" id="navState">Idle</span>
         </div>
+        <div class="status-item">
+            <span class="status-label">Battery</span>
+            <span class="status-value" id="batteryPercent">---</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">Voltage</span>
+            <span class="status-value" id="batteryVoltage">---</span>
+        </div>
         <div
             style="margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border-color); text-align: center;">
             <small style="color: var(--text-secondary); font-size: 11px;">v1.0.0</small>
@@ -134,6 +148,9 @@
         let ws, mapData = null, robotPose = null, scanPoints = [], planPath = [];
         let scale = 1.0, offsetX = 0, offsetY = 0, isFirstLoad = true;
         let showPlan = true, showLidar = true, currentGoal = null;
+        let emergencyStopActive = false;
+        let maxLinearVelocity = 0.2;  // Default values
+        let maxAngularVelocity = 0.2;
         const ROBOT_SIZE_PX = 30;
 
         // Theme toggle
@@ -176,11 +193,30 @@
         // Emergency stop function
         function emergencyStop() {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'cmd_vel', linear: 0, angular: 0 }));
                 ws.send(JSON.stringify({ type: 'emergency_stop' }));
-                showToast('Emergency stop activated!', 'error');
+                // State will be updated when server responds
             } else {
                 showToast('Not connected to robot', 'error');
+            }
+        }
+
+        function updateEstopUI() {
+            const banner = document.getElementById('estop-banner');
+            const btn = document.getElementById('emergencyStopBtn');
+            const header = document.getElementById('header');
+
+            if (emergencyStopActive) {
+                banner.style.display = 'block';
+                header.style.top = '48px';  // Push header down when banner is visible
+                btn.style.background = '#15803d'; // Green when active (to deactivate)
+                btn.textContent = '✓ Resume';
+                btn.title = 'Click to resume normal operation';
+            } else {
+                banner.style.display = 'none';
+                header.style.top = '0';
+                btn.style.background = '#dc2626'; // Red when inactive (to activate)
+                btn.textContent = '⚠️ E-STOP';
+                btn.title = 'Emergency Stop (Spacebar)';
             }
         }
 
@@ -295,7 +331,22 @@
                         return;
                     }
 
-                    if (msg.type === 'map') {
+                    if (msg.type === 'config') {
+                        // Receive max velocity parameters
+                        maxLinearVelocity = msg.max_linear_velocity;
+                        maxAngularVelocity = msg.max_angular_velocity;
+                        console.log('Received config:', maxLinearVelocity, maxAngularVelocity);
+                    } else if (msg.type === 'estop_state') {
+                        emergencyStopActive = msg.active;
+                        updateEstopUI();
+                        if (msg.active) {
+                            showToast('Emergency stop activated', 'error');
+                        } else {
+                            showToast('Emergency stop deactivated', 'success');
+                        }
+                    } else if (msg.type === 'goal_rejected') {
+                        showToast('Goal rejected: ' + msg.reason, 'error');
+                    } else if (msg.type === 'map') {
                         // Check if this is a different map (different dimensions)
                         const isNewMap = !mapData ||
                             mapData.width !== msg.width ||
@@ -314,8 +365,21 @@
                         drawMap();
                     }
                     else if (msg.type === 'pose') { robotPose = msg; updateDistance(); drawMap(); }
-                    else if (msg.type === 'scan') { scanPoints = msg.points; drawMap(); }
-                    else if (msg.type === 'plan') {
+                    else if (msg.type === 'scan') {
+                        scanPoints = msg.points || [];
+                        drawMap();
+                    } else if (msg.type === 'battery') {
+                        // Update battery display
+                        const batteryPercent = msg.percentage !== undefined ? msg.percentage.toFixed(1) + '%' : '---';
+                        const voltage = msg.voltage !== undefined ? msg.voltage.toFixed(2) + 'V' : '---';
+                        const status = msg.power_supply_status;
+                        let statusIcon = '';
+                        if (status === 1) statusIcon = ' ⚡'; // Charging
+                        else if (status === 4) statusIcon = ' ✓'; // Full
+
+                        document.getElementById('batteryPercent').textContent = batteryPercent + statusIcon;
+                        document.getElementById('batteryVoltage').textContent = voltage;
+                    } else if (msg.type === 'plan') {
                         planPath = msg.path;
                         updateDistance();
                         drawMap();
@@ -565,6 +629,14 @@
 
         canvas.onmouseup = (e) => {
             if ((goalMode || poseMode) && goalStartPos) {
+                // Check if E-STOP is active before setting goal
+                if (emergencyStopActive && goalMode) {
+                    showToast('Cannot set goal - emergency stop is active', 'error');
+                    goalStartPos = null;
+                    isDragging = false;
+                    return;
+                }
+
                 const dx = e.clientX - goalStartPos.x;
                 const dy = e.clientY - goalStartPos.y;
                 const distance = Math.sqrt(dx * dx + dy * dy);
